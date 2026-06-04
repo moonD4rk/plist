@@ -68,11 +68,12 @@ func (p *bplistParser) parseDocument() (pval cfValue, parseError error) {
 				panic(r)
 			}
 
-			if e, ok := r.(error); ok {
-				parseError = plistParseError{"binary", e}
-			} else {
+			err, ok := r.(error)
+			if !ok {
 				panic(r)
 			}
+
+			parseError = plistParseError{"binary", err}
 		}
 	}()
 
@@ -126,23 +127,35 @@ func (p *bplistParser) parseSizedInteger(off offset, nbytes int) (lo, hi uint64,
 	// negative 1, 2, or 4-byte integers are always emitted as 64-bit.
 	switch nbytes {
 	case 1:
+		p.checkBufferRange(off, 1) // runzero patch
 		lo, hi = uint64(p.buffer[off]), 0
 	case 2:
+		p.checkBufferRange(off, 2) // runzero patch
 		lo, hi = uint64(binary.BigEndian.Uint16(p.buffer[off:])), 0
 	case 4:
+		p.checkBufferRange(off, 4) // runzero patch
 		lo, hi = uint64(binary.BigEndian.Uint32(p.buffer[off:])), 0
 	case 8:
+		p.checkBufferRange(off, 8) // runzero patch
 		lo = binary.BigEndian.Uint64(p.buffer[off:])
 		if p.buffer[off]&0x80 != 0 {
 			// sign extend if lo is signed
 			hi = signedHighBits
 		}
 	case 16:
+		p.checkBufferRange(off, 16) // runzero patch
 		lo, hi = binary.BigEndian.Uint64(p.buffer[off+8:]), binary.BigEndian.Uint64(p.buffer[off:])
 	default:
 		if nbytes > 8 {
 			panic(errors.New("illegal integer size"))
 		}
+		// runzero patch: the read is an 8-byte big-endian load
+		// ending at off+nbytes; its start is off-(8-nbytes). Reject if it would
+		// underflow before zero or extend past the buffer.
+		if offset(8-nbytes) > off {
+			panic(fmt.Errorf("integer read at offset 0x%x underflows buffer", off))
+		}
+		p.checkBufferRange(off-(8-offset(nbytes)), 8)
 		lo, hi = binary.BigEndian.Uint64(p.buffer[off-(8-offset(nbytes)):])&((1<<offset(nbytes*8))-1), 0
 	}
 	newOffset = off + offset(nbytes)
@@ -178,7 +191,31 @@ func (p *bplistParser) objectAtIndex(index uint64) cfValue {
 	return pval
 }
 
+// checkBufferRange panics with a (recoverable, non-runtime) parse error if the
+// half-open byte range [start, start+length) is not fully contained within the
+// parsed buffer. runzero patch: every offset/length read derived
+// from attacker-controlled offset-table or count fields must be bounds-checked
+// before slicing so a crafted bplist cannot trigger an out-of-bounds slice
+// panic (which the package deliberately re-throws past Decode as a runtime
+// error). Using uint64 math throughout avoids wraparound on near-overflow
+// values.
+func (p *bplistParser) checkBufferRange(start offset, length uint64) {
+	bufLen := uint64(len(p.buffer))
+	s := uint64(start)
+	if s > bufLen || length > bufLen-s {
+		panic(fmt.Errorf("read of %d bytes at offset 0x%x exceeds buffer length %d", length, s, bufLen))
+	}
+}
+
 func (p *bplistParser) pushNestedObject(off offset) {
+	// runzero patch: bound container-nesting depth. The existing
+	// loop only rejects an exact self-reference already on the stack; a chain
+	// of N distinct nested containers would otherwise recurse N deep and can
+	// overflow the goroutine stack (an unrecoverable fatal error) on a small
+	// crafted binary plist. containerStack length is the current depth.
+	if len(p.containerStack) >= maxParseDepth {
+		panic(errMaxDepthExceeded)
+	}
 	for _, v := range p.containerStack {
 		if v == off {
 			p.panicNestedObject(off)
@@ -202,6 +239,7 @@ func (p *bplistParser) popNestedObject() {
 }
 
 func (p *bplistParser) parseTagAtOffset(off offset) cfValue {
+	p.checkBufferRange(off, 1) // runzero patch
 	tag := p.buffer[off]
 
 	switch tag & 0xF0 {
@@ -220,14 +258,17 @@ func (p *bplistParser) parseTagAtOffset(off offset) cfValue {
 		nbytes := 1 << (tag & 0x0F)
 		switch nbytes {
 		case 4:
+			p.checkBufferRange(off+1, 4) // runzero patch
 			bits := binary.BigEndian.Uint32(p.buffer[off+1:])
 			return &cfReal{wide: false, value: float64(math.Float32frombits(bits))}
 		case 8:
+			p.checkBufferRange(off+1, 8) // runzero patch
 			bits := binary.BigEndian.Uint64(p.buffer[off+1:])
 			return &cfReal{wide: true, value: math.Float64frombits(bits)}
 		}
 		panic(errors.New("illegal float size"))
 	case bpTagDate:
+		p.checkBufferRange(off+1, 8) // runzero patch
 		bits := binary.BigEndian.Uint64(p.buffer[off+1:])
 		val := math.Float64frombits(bits)
 
@@ -236,8 +277,8 @@ func (p *bplistParser) parseTagAtOffset(off offset) cfValue {
 		val += 978307200
 
 		sec, fsec := math.Modf(val)
-		t := time.Unix(int64(sec), int64(fsec*float64(time.Second))).In(time.UTC)
-		return cfDate(t)
+		tm := time.Unix(int64(sec), int64(fsec*float64(time.Second))).In(time.UTC)
+		return cfDate(tm)
 	case bpTagData:
 		data := p.parseDataAtOffset(off)
 		return cfData(data)
@@ -274,31 +315,31 @@ func (p *bplistParser) countForTagAtOffset(off offset) (uint64, offset) {
 }
 
 func (p *bplistParser) parseDataAtOffset(off offset) []byte {
-	cnt, start := p.countForTagAtOffset(off)
-	if start+offset(cnt) > offset(p.trailer.OffsetTableOffset) {
-		panic(fmt.Errorf("data@0x%x too long (%v bytes, max is %v)", off, cnt, p.trailer.OffsetTableOffset-uint64(start)))
+	count, start := p.countForTagAtOffset(off)
+	if start+offset(count) > offset(p.trailer.OffsetTableOffset) {
+		panic(fmt.Errorf("data@0x%x too long (%v bytes, max is %v)", off, count, p.trailer.OffsetTableOffset-uint64(start)))
 	}
-	return p.buffer[start : start+offset(cnt)]
+	return p.buffer[start : start+offset(count)]
 }
 
 func (p *bplistParser) parseASCIIStringAtOffset(off offset) string {
-	cnt, start := p.countForTagAtOffset(off)
-	if start+offset(cnt) > offset(p.trailer.OffsetTableOffset) {
-		panic(fmt.Errorf("ascii string@0x%x too long (%v bytes, max is %v)", off, cnt, p.trailer.OffsetTableOffset-uint64(start)))
+	count, start := p.countForTagAtOffset(off)
+	if start+offset(count) > offset(p.trailer.OffsetTableOffset) {
+		panic(fmt.Errorf("ascii string@0x%x too long (%v bytes, max is %v)", off, count, p.trailer.OffsetTableOffset-uint64(start)))
 	}
 
-	return zeroCopy8BitString(p.buffer, int(start), int(cnt))
+	return zeroCopy8BitString(p.buffer, int(start), int(count))
 }
 
 func (p *bplistParser) parseUTF16StringAtOffset(off offset) string {
-	cnt, start := p.countForTagAtOffset(off)
-	nbytes := cnt * 2
-	if start+offset(nbytes) > offset(p.trailer.OffsetTableOffset) {
-		panic(fmt.Errorf("utf16 string@0x%x too long (%v bytes, max is %v)", off, nbytes, p.trailer.OffsetTableOffset-uint64(start)))
+	count, start := p.countForTagAtOffset(off)
+	byteLen := count * 2
+	if start+offset(byteLen) > offset(p.trailer.OffsetTableOffset) {
+		panic(fmt.Errorf("utf16 string@0x%x too long (%v bytes, max is %v)", off, byteLen, p.trailer.OffsetTableOffset-uint64(start)))
 	}
 
-	u16s := make([]uint16, cnt)
-	for i := offset(0); i < offset(cnt); i++ {
+	u16s := make([]uint16, count)
+	for i := offset(0); i < offset(count); i++ {
 		u16s[i] = binary.BigEndian.Uint16(p.buffer[start+(i*2):])
 	}
 	runes := utf16.Decode(u16s)
@@ -325,7 +366,7 @@ func (p *bplistParser) parseDictionaryAtOffset(off offset) *cfDictionary {
 	p.pushNestedObject(off)
 	defer p.popNestedObject()
 
-	// a dictionary is an object list of [keys... vals...]
+	// A dictionary is an object list of [keys... values...].
 	cnt, start := p.countForTagAtOffset(off)
 	objects := p.parseObjectListAtOffset(start, cnt*2)
 

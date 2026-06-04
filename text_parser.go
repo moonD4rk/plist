@@ -26,6 +26,7 @@ type textPlistParser struct {
 	start int
 	pos   int
 	width int
+	depth int // runzero patch: current container-nesting depth
 }
 
 func convertU16(buffer []byte, bo binary.ByteOrder) (string, error) {
@@ -72,12 +73,12 @@ func (p *textPlistParser) parseDocument() (pval cfValue, parseError error) {
 			if _, ok := r.(runtime.Error); ok {
 				panic(r)
 			}
-			// Wrap all non-invalid-plist errors.
-			if e, ok := r.(error); ok {
-				parseError = plistParseError{"text", e}
-			} else {
+			err, ok := r.(error)
+			if !ok {
 				panic(r)
 			}
+			// Wrap all non-invalid-plist errors.
+			parseError = plistParseError{"text", err}
 		}
 	}()
 
@@ -107,13 +108,12 @@ func (p *textPlistParser) parseDocument() (pval cfValue, parseError error) {
 	}
 
 	pval = val
-
 	return pval, parseError
 }
 
 const eof rune = -1
 
-func (p *textPlistParser) error(e string, args ...any) {
+func (p *textPlistParser) error(e string, args ...interface{}) {
 	line := strings.Count(p.input[:p.pos], "\n")
 	char := p.pos - strings.LastIndex(p.input[:p.pos], "\n") - 1
 	panic(fmt.Errorf("%s at line %d character %d", fmt.Sprintf(e, args...), line, char))
@@ -198,9 +198,8 @@ loop:
 			if x := strings.Index(p.input[p.pos:], "*/"); x >= 0 {
 				p.pos += x + 2 // skip the */ as well
 				continue       // consume more whitespace
-			} else {
-				p.error("unexpected eof in block comment")
 			}
+			p.error("unexpected eof in block comment")
 		default:
 			break loop
 		}
@@ -234,13 +233,13 @@ func (p *textPlistParser) parseHexDigits(maxDigits int) uint64 {
 		switch {
 		case r >= 'a' && r <= 'f':
 			val <<= 4
-			val |= 10 + uint64(r-'a')
+			val |= 10 + uint64((r - 'a'))
 		case r >= 'A' && r <= 'F':
 			val <<= 4
-			val |= 10 + uint64(r-'A')
+			val |= 10 + uint64((r - 'A'))
 		case r >= '0' && r <= '9':
 			val <<= 4
-			val |= uint64(r - '0')
+			val |= uint64((r - '0'))
 		default:
 			p.backup()
 			return val
@@ -303,6 +302,7 @@ func (p *textPlistParser) parseQuotedString() cfString {
 			if !slowPath {
 				return cfString(section)
 			}
+
 			s += section
 			return cfString(s)
 		case '\\':
@@ -354,8 +354,7 @@ outer:
 		p.skipWhitespaceAndComments()
 
 		var val cfValue
-		n := p.next()
-		switch n {
+		switch p.next() {
 		case ';':
 			// This is supposed to be .strings-specific.
 			// GNUstep parses this as an empty string.
@@ -374,11 +373,12 @@ outer:
 			p.error("missing = in dictionary")
 		}
 
-		keyStr, ok := keypv.(cfString)
+		key, ok := keypv.(cfString)
 		if !ok {
 			p.error("dictionary key is not a string")
 		}
-		keys = append(keys, string(keyStr))
+
+		keys = append(keys, string(key))
 		values = append(values, val)
 	}
 
@@ -461,6 +461,7 @@ func (p *textPlistParser) parseGNUStepValue() cfValue {
 			n := mustParseInt(v, 10, 64)
 			return &cfNumber{signed: true, value: uint64(n)}
 		}
+
 		n := mustParseUint(v, 10, 64)
 		return &cfNumber{signed: false, value: n}
 	case 'R':
@@ -533,11 +534,11 @@ func (p *textPlistParser) parseHexData() cfData {
 		buf[i] <<= 4
 		switch {
 		case r >= 'a' && r <= 'f':
-			buf[i] |= 10 + byte(r-'a')
+			buf[i] |= 10 + byte((r - 'a'))
 		case r >= 'A' && r <= 'F':
-			buf[i] |= 10 + byte(r-'A')
+			buf[i] |= 10 + byte((r - 'A'))
 		case r >= '0' && r <= '9':
-			buf[i] |= byte(r - '0')
+			buf[i] |= byte((r - '0'))
 		default:
 			p.error("unexpected hex digit `%c'", r)
 		}
@@ -555,6 +556,16 @@ func (p *textPlistParser) parseHexData() cfData {
 }
 
 func (p *textPlistParser) parsePlistValue() cfValue {
+	// runzero patch: bound recursion depth. parseDictionary and
+	// parseArray recurse back into parsePlistValue once per nested value, so a
+	// deeply nested text/OpenStep plist would otherwise overflow the goroutine
+	// stack (an unrecoverable fatal error). Guarding here covers both.
+	p.depth++
+	if p.depth > maxParseDepth {
+		panic(errMaxDepthExceeded)
+	}
+	defer func() { p.depth-- }()
+
 	for {
 		p.skipWhitespaceAndComments()
 
