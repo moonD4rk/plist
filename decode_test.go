@@ -3,6 +3,7 @@ package plist
 import (
 	"bytes"
 	"fmt"
+	"io"
 	"reflect"
 	"testing"
 )
@@ -213,4 +214,56 @@ func ExampleDecoder_Decode() {
 	fmt.Println(data)
 
 	// Output: {6.0 8388608 1 com.apple.diskimage.sparsebundle 4398046511104}
+}
+
+// chunkedReader returns at most n bytes per Read, modeling a streaming source
+// (socket, pipe, TLS/gzip boundary) that does not fill a 6-byte buffer in one
+// call. It supports the Seek(0,0) rewind the decoder uses for format sniffing.
+type chunkedReader struct {
+	data []byte
+	pos  int
+	n    int
+}
+
+func (r *chunkedReader) Read(p []byte) (int, error) {
+	if r.pos >= len(r.data) {
+		return 0, io.EOF
+	}
+	n := r.n
+	if n > len(p) {
+		n = len(p)
+	}
+	if r.pos+n > len(r.data) {
+		n = len(r.data) - r.pos
+	}
+	copy(p, r.data[r.pos:r.pos+n])
+	r.pos += n
+	return n, nil
+}
+
+func (r *chunkedReader) Seek(offset int64, _ int) (int64, error) {
+	r.pos = int(offset)
+	return offset, nil
+}
+
+// A valid binary plist delivered through a reader that returns few bytes per
+// Read must still be detected as Binary, not misrouted to the text parser.
+func TestShortReadFormatDetection(t *testing.T) {
+	bin, err := Marshal(map[string]any{"hello": "world"}, BinaryFormat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, chunk := range []int{1, 2, 3, 5} {
+		var out map[string]any
+		dec := NewDecoder(&chunkedReader{data: bin, n: chunk})
+		if err := dec.Decode(&out); err != nil {
+			t.Fatalf("chunk=%d: decode failed: %v", chunk, err)
+		}
+		if dec.Format != BinaryFormat {
+			t.Fatalf("chunk=%d: format=%d, want BinaryFormat(%d)", chunk, dec.Format, BinaryFormat)
+		}
+		if out["hello"] != "world" {
+			t.Fatalf("chunk=%d: got %v, want map[hello:world]", chunk, out)
+		}
+	}
 }

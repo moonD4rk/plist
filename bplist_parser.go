@@ -77,7 +77,11 @@ func (p *bplistParser) parseDocument() (pval cfValue, parseError error) {
 		}
 	}()
 
-	p.buffer, _ = io.ReadAll(p.reader)
+	buf, err := io.ReadAll(p.reader)
+	if err != nil {
+		panic(err)
+	}
+	p.buffer = buf
 
 	l := len(p.buffer)
 	if l < 40 {
@@ -309,6 +313,16 @@ func (p *bplistParser) countForTagAtOffset(off offset) (uint64, offset) {
 	cnt := uint64(tag & 0x0F)
 	if cnt == 0xF {
 		cnt, _, off = p.parseIntegerAtOffset(off + 1)
+		// runzero patch: an extended count is an attacker-controlled 8-byte
+		// integer. A real element/byte count can never exceed the object region
+		// (which ends at OffsetTableOffset), so reject larger values HERE, before
+		// any downstream count*K / start+count arithmetic can wrap uint64 and
+		// slip a huge length past the per-consumer bounds checks into
+		// make()/slice/unsafe.String — an unrecoverable runtime panic that
+		// escapes Decode's recover and crashes the caller.
+		if cnt > p.trailer.OffsetTableOffset {
+			panic(fmt.Errorf("element count %d at offset 0x%x exceeds object region (table@0x%x)", cnt, off, p.trailer.OffsetTableOffset))
+		}
 		return cnt, off
 	}
 	return cnt, off + 1

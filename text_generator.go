@@ -42,7 +42,16 @@ func (p *textPlistGenerator) plistQuotedString(str string) string {
 			quot = true
 			b.WriteString(`\U`)
 			us := strconv.FormatInt(int64(r), 16)
-			b.WriteString(padding[len(us):])
+			// Pad to >=4 hex digits without slicing a fixed-width string (the old
+			// padding[len(us):] panicked on astral runes >= U+10000). NB: a single
+			// 5-6 digit \U is not a faithful OpenStep/GNUStep escape — that format
+			// encodes UTF-16 code units, so astral runes need a surrogate pair, and
+			// this package's text parser reads only 4 hex digits. Such runes do NOT
+			// round-trip through OpenStep/GNUStep (they do through XML/Binary); this
+			// branch only guarantees Marshal no longer panics. See TestAstralRuneMarshal.
+			for i := len(us); i < 4; i++ {
+				b.WriteByte('0')
+			}
 			b.WriteString(us)
 		case r > 0x7F:
 			quot = true
