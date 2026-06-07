@@ -3,6 +3,7 @@ package plist
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"io"
 	"reflect"
 	"runtime"
@@ -49,6 +50,8 @@ func (p *Encoder) Encode(v any) (err error) {
 		g = newBplistGenerator(p.writer)
 	case OpenStepFormat, GNUStepFormat:
 		g = newTextPlistGenerator(p.writer, p.format)
+	default:
+		panic(fmt.Errorf("plist: invalid encoding format %d", p.format))
 	}
 	g.Indent(p.indent)
 	g.generateDocument(pval)

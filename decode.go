@@ -2,6 +2,7 @@ package plist
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"reflect"
 	"runtime"
@@ -38,8 +39,18 @@ func (p *Decoder) Decode(v any) (err error) {
 	}()
 
 	header := make([]byte, 6)
-	p.reader.Read(header)
-	p.reader.Seek(0, 0)
+	// runzero patch: io.ReadFull, not a bare Read, so a streaming reader that
+	// returns <6 bytes on its first Read does not misdetect the format. A
+	// genuinely short input (EOF before 6 bytes) cannot be a binary plist (its
+	// magic is 6 bytes), so fall through to the XML/text path; only a real I/O
+	// error aborts.
+	if _, err := io.ReadFull(p.reader, header); err != nil &&
+		!errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
+		return err
+	}
+	if _, err := p.reader.Seek(0, io.SeekStart); err != nil {
+		return err
+	}
 
 	var parser parser
 	var pval cfValue

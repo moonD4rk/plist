@@ -494,3 +494,49 @@ func TestInvalidBinaryPlists(t *testing.T) {
 		}
 	}
 }
+
+// overflowBplist builds a minimal binary plist whose single root object uses the
+// given tag with an 8-byte extended count of 2^64-1 — the value that made the
+// parser wrap its count/offset arithmetic and slip a huge length past the bounds
+// checks into make()/slice/unsafe.String, crashing the caller with a runtime
+// error. OffsetTableOffset is 0x12, which the count vastly exceeds, so
+// countForTagAtOffset rejects it cleanly.
+func overflowBplist(tag byte) []byte {
+	return []byte{
+		'b', 'p', 'l', 'i', 's', 't', '0', '0',
+		tag, 0x13, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, // tag + 8-byte count = 2^64-1
+		0x08,                         // offset table[0] -> object at 0x08
+		0x00, 0x00, 0x00, 0x00, 0x00, // trailer: unused[5]
+		0x00,                                           // sort version
+		0x01,                                           // offset int size
+		0x01,                                           // object ref size
+		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, // num objects = 1
+		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // top object = 0
+		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x12, // offset table offset = 0x12
+	}
+}
+
+// A crafted oversized extended count must yield a clean error, never an
+// integer-overflow runtime panic that escapes Unmarshal.
+func TestCraftedCountOverflowReturnsErrorNotCrash(t *testing.T) {
+	tags := []struct {
+		name string
+		tag  byte
+	}{
+		{"dataTag", 0x4F},
+		{"asciiTag", 0x5F},
+		{"utf16Tag", 0x6F},
+		{"arrayTag", 0xAF},
+		{"dictTag", 0xDF},
+	}
+	for _, tc := range tags {
+		t.Run(tc.name, func(t *testing.T) {
+			var v any
+			_, err := Unmarshal(overflowBplist(tc.tag), &v)
+			if err == nil {
+				t.Fatalf("crafted overflow %s: expected error, got nil", tc.name)
+			}
+			t.Log(err)
+		})
+	}
+}
