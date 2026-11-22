@@ -59,8 +59,6 @@ type binaryWriter struct {
 	dates    map[time.Time]uint64
 	// Containers by identity; booleans and UIDs by value, stored per occurrence with the last one winning.
 	others map[cfValue]uint64
-
-	scratch [8]byte // for the bytes of one marker or integer, so that writing them does not allocate
 }
 
 func (w *binaryWriter) indexOf(value cfValue) (index uint64, ok bool) {
@@ -110,9 +108,9 @@ func (w *binaryWriter) write(b []byte) {
 	}
 }
 
+// Every write gets a slice of its own: v1 did the same, and a caller's Writer may keep what it is given.
 func (w *binaryWriter) writeByte(b byte) {
-	w.scratch[0] = b
-	w.write(w.scratch[:1])
+	w.write([]byte{b})
 }
 
 func (w *binaryWriter) flatten(value cfValue) {
@@ -215,8 +213,9 @@ func (w *binaryWriter) writeObject(value cfValue) {
 func (w *binaryWriter) writeSizedInt(n uint64, nbytes int) {
 	switch nbytes {
 	case 1, 2, 4, 8:
-		binary.BigEndian.PutUint64(w.scratch[:], n)
-		w.write(w.scratch[8-nbytes:])
+		var b [8]byte
+		binary.BigEndian.PutUint64(b[:], n)
+		w.write(b[8-nbytes:])
 	default:
 		panic(errors.New("illegal integer size"))
 	}
