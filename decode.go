@@ -58,7 +58,7 @@ func (d *Decoder) Decode(v any) (err error) {
 	var root cfValue
 	switch first {
 	case BinaryFormat:
-		root, err = newBplistParser(d.reader).parseDocument()
+		root, err = newBinaryParser(d.reader).parseDocument()
 		if err != nil {
 			// Had a bplist header, but still got an error: we have to die here.
 			return err

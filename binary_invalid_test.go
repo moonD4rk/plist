@@ -485,7 +485,7 @@ var InvalidBplists = [][]byte{
 func TestInvalidBinaryPlists(t *testing.T) {
 	for _, data := range InvalidBplists {
 		buf := bytes.NewReader(data)
-		d := newBplistParser(buf)
+		d := newBinaryParser(buf)
 		_, err := d.parseDocument()
 		if err == nil {
 			t.Fatal("invalid plist failed to throw error")
