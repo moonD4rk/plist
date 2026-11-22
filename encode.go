@@ -42,8 +42,8 @@ func (e *Encoder) Encode(v any) (err error) {
 		}
 	}()
 
-	pval := e.marshal(reflect.ValueOf(v))
-	if pval == nil {
+	root := e.marshal(reflect.ValueOf(v))
+	if root == nil {
 		panic(errors.New("plist: no root element to encode"))
 	}
 
@@ -59,7 +59,7 @@ func (e *Encoder) Encode(v any) (err error) {
 		panic(fmt.Errorf("plist: invalid encoding format %d", e.format))
 	}
 	g.Indent(e.indent)
-	g.generateDocument(pval)
+	g.generateDocument(root)
 	return err
 }
 
@@ -157,9 +157,9 @@ func MarshalIndent(v any, format int, indent string) ([]byte, error) {
 }
 
 var (
-	plistMarshalerType = reflect.TypeOf((*Marshaler)(nil)).Elem()
-	textMarshalerType  = reflect.TypeOf((*encoding.TextMarshaler)(nil)).Elem()
-	timeType           = reflect.TypeOf((*time.Time)(nil)).Elem()
+	marshalerType     = reflect.TypeOf((*Marshaler)(nil)).Elem()
+	textMarshalerType = reflect.TypeOf((*encoding.TextMarshaler)(nil)).Elem()
+	timeType          = reflect.TypeOf((*time.Time)(nil)).Elem()
 )
 
 // A method declared on the element type cannot be called through a nil pointer, so the pointer is left out.
@@ -170,36 +170,37 @@ func isNilValueReceiver(val reflect.Value, interfaceType reflect.Type) bool {
 	return val.Kind() == reflect.Ptr && val.IsNil() && val.Type().Elem().Implements(interfaceType)
 }
 
-func implementsInterface(val reflect.Value, interfaceType reflect.Type) (any, bool) {
+// implementation returns val as a T, or a pointer to val when val is addressable and the pointer is a T.
+func implementation[T any](val reflect.Value) (T, bool) {
 	if val.CanInterface() {
-		itf := val.Interface()
-		if itf != nil && reflect.TypeOf(itf).Implements(interfaceType) {
-			return itf, true
+		if impl, ok := val.Interface().(T); ok {
+			return impl, true
 		}
 	}
 
 	if val.CanAddr() {
-		if pv := val.Addr(); pv.CanInterface() {
-			itf := pv.Interface()
-			if itf != nil && reflect.TypeOf(itf).Implements(interfaceType) {
-				return itf, true
+		if ptr := val.Addr(); ptr.CanInterface() {
+			if impl, ok := ptr.Interface().(T); ok {
+				return impl, true
 			}
 		}
 	}
-	return nil, false
+
+	var none T
+	return none, false
 }
 
-func (e *Encoder) marshalPlistInterface(marshalable Marshaler) cfValue {
-	value, err := marshalable.MarshalPlist()
+func (e *Encoder) marshalMarshaler(m Marshaler) cfValue {
+	value, err := m.MarshalPlist()
 	if err != nil {
 		panic(err)
 	}
 	return e.marshal(reflect.ValueOf(value))
 }
 
-// marshalTextInterface marshals a TextMarshaler to a plist string.
-func (e *Encoder) marshalTextInterface(marshalable encoding.TextMarshaler) cfValue {
-	s, err := marshalable.MarshalText()
+// marshalTextMarshaler marshals a TextMarshaler to a plist string.
+func (e *Encoder) marshalTextMarshaler(tm encoding.TextMarshaler) cfValue {
+	s, err := tm.MarshalText()
 	if err != nil {
 		panic(err)
 	}
@@ -208,23 +209,23 @@ func (e *Encoder) marshalTextInterface(marshalable encoding.TextMarshaler) cfVal
 
 // marshalStruct marshals a reflected struct value to a plist dictionary
 func (e *Encoder) marshalStruct(typ reflect.Type, val reflect.Value) cfValue {
-	tinfo, _ := cachedFields(typ)
+	fields := cachedFields(typ)
 
 	dict := &cfDict{
-		keys:   make([]string, 0, len(tinfo.fields)),
-		values: make([]cfValue, 0, len(tinfo.fields)),
+		keys:   make([]string, 0, len(fields)),
+		values: make([]cfValue, 0, len(fields)),
 	}
-	for _, finfo := range tinfo.fields {
-		value := finfo.fieldForEncode(val)
+	for _, f := range fields {
+		value := f.fieldForEncode(val)
 		if !value.IsValid() {
 			continue
 		}
-		pval := e.marshal(value)
-		if pval == nil {
+		encoded := e.marshal(value)
+		if encoded == nil {
 			continue
 		}
-		dict.keys = append(dict.keys, finfo.name)
-		dict.values = append(dict.values, pval)
+		dict.keys = append(dict.keys, f.name)
+		dict.values = append(dict.values, encoded)
 	}
 
 	return dict
@@ -247,12 +248,11 @@ func (e *Encoder) marshal(val reflect.Value) cfValue {
 		return nil
 	}
 
-	if isNilValueReceiver(val, plistMarshalerType) {
+	if isNilValueReceiver(val, marshalerType) {
 		return nil
 	}
-	if receiver, can := implementsInterface(val, plistMarshalerType); can {
-		m, _ := receiver.(Marshaler)
-		return e.marshalPlistInterface(m)
+	if m, ok := implementation[Marshaler](val); ok {
+		return e.marshalMarshaler(m)
 	}
 
 	// time.Time implements TextMarshaler, but we need to store it in RFC3339
@@ -270,9 +270,8 @@ func (e *Encoder) marshal(val reflect.Value) cfValue {
 	if isNilValueReceiver(val, textMarshalerType) {
 		return nil
 	}
-	if receiver, can := implementsInterface(val, textMarshalerType); can {
-		tm, _ := receiver.(encoding.TextMarshaler)
-		return e.marshalTextInterface(tm)
+	if tm, ok := implementation[encoding.TextMarshaler](val); ok {
+		return e.marshalTextMarshaler(tm)
 	}
 
 	// Descend into pointers or interfaces
@@ -322,8 +321,8 @@ func (e *Encoder) marshal(val reflect.Value) cfValue {
 		}
 		values := make([]cfValue, val.Len())
 		for i, length := 0, val.Len(); i < length; i++ {
-			if subpval := e.marshal(val.Index(i)); subpval != nil {
-				values[i] = subpval
+			if elem := e.marshal(val.Index(i)); elem != nil {
+				values[i] = elem
 			}
 		}
 		return &cfArray{values}
@@ -338,9 +337,9 @@ func (e *Encoder) marshal(val reflect.Value) cfValue {
 			values: make([]cfValue, 0, l),
 		}
 		for _, keyv := range val.MapKeys() {
-			if subpval := e.marshal(val.MapIndex(keyv)); subpval != nil {
+			if elem := e.marshal(val.MapIndex(keyv)); elem != nil {
 				dict.keys = append(dict.keys, keyv.String())
-				dict.values = append(dict.values, subpval)
+				dict.values = append(dict.values, elem)
 			}
 		}
 		return dict

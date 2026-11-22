@@ -46,15 +46,15 @@ func (p *cfDict) sort() {
 	sort.Sort(p)
 }
 
-func (p *cfDict) maybeUID(lax bool) cfValue {
-	if len(p.keys) == 1 && p.keys[0] == "CF$UID" && len(p.values) == 1 {
-		pval := p.values[0]
-		if integer, ok := pval.(*cfInteger); ok {
+func (p *cfDict) maybeUID(coerceStrings bool) cfValue {
+	if len(p.keys) == 1 && p.keys[0] == cfUIDMagic && len(p.values) == 1 {
+		value := p.values[0]
+		if integer, ok := value.(*cfInteger); ok {
 			return cfUID(integer.value)
 		}
 		// Openstep only has cfString. Act like the unmarshaller a bit.
-		if lax {
-			if str, ok := pval.(cfString); ok {
+		if coerceStrings {
+			if str, ok := value.(cfString); ok {
 				if i, err := strconv.ParseUint(string(str), 10, 64); err == nil {
 					return cfUID(i)
 				}

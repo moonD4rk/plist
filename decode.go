@@ -12,10 +12,6 @@ import (
 	"time"
 )
 
-type parser interface {
-	parseDocument() (cfValue, error)
-}
-
 // A Decoder reads a property list from an input stream.
 type Decoder struct {
 	// Format is the format of the property list that Decode parsed most recently, or InvalidFormat
@@ -59,26 +55,23 @@ func (d *Decoder) Decode(v any) (err error) {
 		return err
 	}
 
-	var parser parser
-	var pval cfValue
+	var root cfValue
 	switch first {
 	case BinaryFormat:
-		parser = newBplistParser(d.reader)
-		pval, err = parser.parseDocument()
+		root, err = newBplistParser(d.reader).parseDocument()
 		if err != nil {
 			// Had a bplist header, but still got an error: we have to die here.
 			return err
 		}
 		d.Format = BinaryFormat
 	case XMLFormat:
-		parser = newXMLPlistParser(d.reader)
-		pval, err = parser.parseDocument()
+		root, err = newXMLPlistParser(d.reader).parseDocument()
 		if _, ok := err.(invalidPlistError); ok {
 			// Rewind: the XML parser might have exhausted the file.
 			if _, err := d.reader.Seek(0, io.SeekStart); err != nil {
 				return err
 			}
-			pval, err = d.parseTextDocument()
+			root, err = d.parseTextDocument()
 		} else if err == nil {
 			d.Format = XMLFormat
 		}
@@ -86,29 +79,28 @@ func (d *Decoder) Decode(v any) (err error) {
 			return err
 		}
 	default:
-		pval, err = d.parseTextDocument()
+		root, err = d.parseTextDocument()
 		if err != nil {
 			return err
 		}
 	}
 
-	d.unmarshalInto(pval, v)
+	d.unmarshalInto(root, v)
 	return err
 }
 
 func (d *Decoder) parseTextDocument() (cfValue, error) {
 	tp := newTextPlistParser(d.reader)
-	pval, err := tp.parseDocument()
+	root, err := tp.parseDocument()
 	if err != nil {
 		return nil, err
 	}
 	d.Format = tp.format
 	if d.Format == OpenStepFormat {
-		// OpenStep property lists can only store strings,
-		// so we have to turn on lax mode here for the unmarshal step later.
+		// OpenStep property lists can only store strings, so numbers, booleans and dates are parsed out of them.
 		d.coerceStrings = true
 	}
-	return pval, nil
+	return root, nil
 }
 
 var (
@@ -217,15 +209,15 @@ func Unmarshal(data []byte, v any) (format int, err error) {
 	return format, err
 }
 
-func settable(val reflect.Value) reflect.Value {
-	if !val.CanSet() {
+func settable(dst reflect.Value) reflect.Value {
+	if !dst.CanSet() {
 		panic(errNotSettable)
 	}
-	return val
+	return dst
 }
 
 // unmarshalInto reports a value that cannot be set as a fault of v, the value the caller passed in.
-func (d *Decoder) unmarshalInto(pval cfValue, v any) {
+func (d *Decoder) unmarshalInto(src cfValue, v any) {
 	target := reflect.ValueOf(v)
 	defer func() {
 		r := recover()
@@ -242,22 +234,20 @@ func (d *Decoder) unmarshalInto(pval cfValue, v any) {
 		panic(&invalidTargetError{typ: target.Type(), isNil: isNil})
 	}()
 
-	d.unmarshal(pval, target)
+	d.unmarshal(src, target)
 }
 
 var (
-	plistUnmarshalerType = reflect.TypeOf((*Unmarshaler)(nil)).Elem()
-	textUnmarshalerType  = reflect.TypeOf((*encoding.TextUnmarshaler)(nil)).Elem()
-	uidType              = reflect.TypeOf(UID(0))
-	stringType           = reflect.TypeOf("")
+	uidType    = reflect.TypeOf(UID(0))
+	stringType = reflect.TypeOf("")
 )
 
 func isEmptyInterface(v reflect.Value) bool {
 	return v.Kind() == reflect.Interface && v.NumMethod() == 0
 }
 
-func (d *Decoder) unmarshalPlistInterface(pval cfValue, unmarshalable Unmarshaler) {
-	err := unmarshalable.UnmarshalPlist(func(i any) (err error) {
+func (d *Decoder) unmarshalUnmarshaler(src cfValue, u Unmarshaler) {
+	err := u.UnmarshalPlist(func(i any) (err error) {
 		defer func() {
 			if r := recover(); r != nil {
 				if _, ok := r.(runtime.Error); ok {
@@ -270,7 +260,7 @@ func (d *Decoder) unmarshalPlistInterface(pval cfValue, unmarshalable Unmarshale
 				}
 			}
 		}()
-		d.unmarshalInto(pval, i)
+		d.unmarshalInto(src, i)
 		return err
 	})
 	if err != nil {
@@ -278,93 +268,91 @@ func (d *Decoder) unmarshalPlistInterface(pval cfValue, unmarshalable Unmarshale
 	}
 }
 
-func (d *Decoder) unmarshalTextInterface(pval cfString, unmarshalable encoding.TextUnmarshaler) {
-	err := unmarshalable.UnmarshalText([]byte(pval))
+func (d *Decoder) unmarshalTextUnmarshaler(text cfString, tu encoding.TextUnmarshaler) {
+	err := tu.UnmarshalText([]byte(text))
 	if err != nil {
 		panic(err)
 	}
 }
 
-func (d *Decoder) unmarshalTime(pval cfDate, val reflect.Value) {
-	settable(val).Set(reflect.ValueOf(time.Time(pval)))
+func (d *Decoder) unmarshalTime(date cfDate, dst reflect.Value) {
+	settable(dst).Set(reflect.ValueOf(time.Time(date)))
 }
 
-func (d *Decoder) unmarshalCoerced(s string, val reflect.Value) {
-	switch val.Kind() {
+func (d *Decoder) unmarshalCoerced(s string, dst reflect.Value) {
+	switch dst.Kind() {
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
 		i := mustParseInt(s, 10, 64)
-		settable(val).SetInt(i)
+		settable(dst).SetInt(i)
 		return
 	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
 		i := mustParseUint(s, 10, 64)
-		settable(val).SetUint(i)
+		settable(dst).SetUint(i)
 		return
 	case reflect.Float32, reflect.Float64:
 		f := mustParseFloat(s, 64)
-		settable(val).SetFloat(f)
+		settable(dst).SetFloat(f)
 		return
 	case reflect.Bool:
 		b := mustParseBool(s)
-		settable(val).SetBool(b)
+		settable(dst).SetBool(b)
 		return
 	case reflect.Struct:
-		if val.Type() == timeType {
+		if dst.Type() == timeType {
 			t, err := time.Parse(textPlistTimeLayout, s)
 			if err != nil {
 				panic(err)
 			}
-			settable(val).Set(reflect.ValueOf(t.In(time.UTC)))
+			settable(dst).Set(reflect.ValueOf(t.In(time.UTC)))
 			return
 		}
 		fallthrough
 	default:
-		panic(&unmarshalTypeError{val.Type(), "string"})
+		panic(&unmarshalTypeError{dst.Type(), "string"})
 	}
 }
 
-func (d *Decoder) unmarshal(pval cfValue, val reflect.Value) {
-	if pval == nil {
+func (d *Decoder) unmarshal(src cfValue, dst reflect.Value) {
+	if src == nil {
 		return
 	}
-	if !val.IsValid() {
+	if !dst.IsValid() {
 		panic(errNotSettable)
 	}
 
-	for val.Kind() == reflect.Ptr {
-		if val.IsNil() {
-			settable(val).Set(reflect.New(val.Type().Elem()))
+	for dst.Kind() == reflect.Ptr {
+		if dst.IsNil() {
+			settable(dst).Set(reflect.New(dst.Type().Elem()))
 		}
-		val = val.Elem()
+		dst = dst.Elem()
 	}
 
-	if isEmptyInterface(val) {
-		v := d.valueInterface(pval)
-		settable(val).Set(reflect.ValueOf(v))
+	if isEmptyInterface(dst) {
+		v := d.valueInterface(src)
+		settable(dst).Set(reflect.ValueOf(v))
 		return
 	}
 
-	incompatibleTypeError := &unmarshalTypeError{val.Type(), pval.typeName()}
+	incompatibleTypeError := &unmarshalTypeError{dst.Type(), src.typeName()}
 
-	if receiver, can := implementsInterface(val, plistUnmarshalerType); can {
-		u, _ := receiver.(Unmarshaler)
-		d.unmarshalPlistInterface(pval, u)
+	if u, ok := implementation[Unmarshaler](dst); ok {
+		d.unmarshalUnmarshaler(src, u)
 		return
 	}
 
 	// A date goes into a time.Time only; it is never handed to UnmarshalText.
-	if date, ok := pval.(cfDate); ok {
-		if val.Type() == timeType {
-			d.unmarshalTime(date, val)
+	if date, ok := src.(cfDate); ok {
+		if dst.Type() == timeType {
+			d.unmarshalTime(date, dst)
 			return
 		}
 		panic(incompatibleTypeError)
 	}
 
-	if val.Type() != timeType {
-		if receiver, can := implementsInterface(val, textUnmarshalerType); can {
-			if str, ok := pval.(cfString); ok {
-				tu, _ := receiver.(encoding.TextUnmarshaler)
-				d.unmarshalTextInterface(str, tu)
+	if dst.Type() != timeType {
+		if tu, ok := implementation[encoding.TextUnmarshaler](dst); ok {
+			if str, ok := src.(cfString); ok {
+				d.unmarshalTextUnmarshaler(str, tu)
 			} else {
 				panic(incompatibleTypeError)
 			}
@@ -372,44 +360,44 @@ func (d *Decoder) unmarshal(pval cfValue, val reflect.Value) {
 		}
 	}
 
-	typ := val.Type()
+	typ := dst.Type()
 
-	switch pval := pval.(type) {
+	switch src := src.(type) {
 	case cfString:
-		if val.Kind() == reflect.String {
-			settable(val).SetString(string(pval))
+		if dst.Kind() == reflect.String {
+			settable(dst).SetString(string(src))
 			return
 		}
 		if d.coerceStrings {
-			d.unmarshalCoerced(string(pval), val)
+			d.unmarshalCoerced(string(src), dst)
 			return
 		}
 
 		panic(incompatibleTypeError)
 	case *cfInteger:
-		switch val.Kind() {
+		switch dst.Kind() {
 		case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-			settable(val).SetInt(int64(pval.value))
+			settable(dst).SetInt(int64(src.value))
 		case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
-			settable(val).SetUint(pval.value)
+			settable(dst).SetUint(src.value)
 		default:
 			panic(incompatibleTypeError)
 		}
 	case *cfReal:
-		if val.Kind() == reflect.Float32 || val.Kind() == reflect.Float64 {
+		if dst.Kind() == reflect.Float32 || dst.Kind() == reflect.Float64 {
 			// TODO: Consider warning on a downcast (storing a 64-bit value in a 32-bit reflect)
-			settable(val).SetFloat(pval.value)
+			settable(dst).SetFloat(src.value)
 		} else {
 			panic(incompatibleTypeError)
 		}
 	case cfBool:
-		if val.Kind() == reflect.Bool {
-			settable(val).SetBool(bool(pval))
+		if dst.Kind() == reflect.Bool {
+			settable(dst).SetBool(bool(src))
 		} else {
 			panic(incompatibleTypeError)
 		}
 	case cfData:
-		if val.Kind() != reflect.Slice && val.Kind() != reflect.Array {
+		if dst.Kind() != reflect.Slice && dst.Kind() != reflect.Array {
 			panic(incompatibleTypeError)
 		}
 
@@ -417,110 +405,82 @@ func (d *Decoder) unmarshal(pval cfValue, val reflect.Value) {
 			panic(incompatibleTypeError)
 		}
 
-		b := []byte(pval)
-		switch val.Kind() {
+		b := []byte(src)
+		switch dst.Kind() {
 		case reflect.Slice:
-			settable(val).SetBytes(b)
+			settable(dst).SetBytes(b)
 		case reflect.Array:
-			if val.Len() < len(b) {
-				panic(fmt.Errorf("plist: attempted to unmarshal %d bytes into a byte array of size %d", len(b), val.Len()))
+			if dst.Len() < len(b) {
+				panic(fmt.Errorf("plist: attempted to unmarshal %d bytes into a byte array of size %d", len(b), dst.Len()))
 			}
-			copy(settable(val).Bytes(), b)
+			copy(settable(dst).Bytes(), b)
 		default:
 			panic(incompatibleTypeError)
 		}
 	case cfUID:
-		if val.Type() == uidType {
-			settable(val).SetUint(uint64(pval))
+		if dst.Type() == uidType {
+			settable(dst).SetUint(uint64(src))
 		} else {
-			switch val.Kind() {
+			switch dst.Kind() {
 			case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-				settable(val).SetInt(int64(pval))
+				settable(dst).SetInt(int64(src))
 			case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
-				settable(val).SetUint(uint64(pval))
+				settable(dst).SetUint(uint64(src))
 			default:
 				panic(incompatibleTypeError)
 			}
 		}
 	case *cfArray:
-		d.unmarshalArray(pval, val)
+		d.unmarshalArray(src, dst)
 	case *cfDict:
-		d.unmarshalDict(pval, val)
+		d.unmarshalDict(src, dst)
 	}
 }
 
-func (d *Decoder) unmarshalArray(a *cfArray, val reflect.Value) {
+func (d *Decoder) unmarshalArray(a *cfArray, dst reflect.Value) {
 	var n int
-	switch val.Kind() {
+	switch dst.Kind() {
 	case reflect.Slice:
-		// Slice of element values.
-		// Grow slice.
-		settable(val)
-		cnt := len(a.values) + val.Len()
-		if cnt > val.Cap() {
-			ncap := val.Cap()
-			for ncap < cnt {
-				ncap = growSliceCap(ncap)
-			}
-			grown := reflect.MakeSlice(val.Type(), val.Len(), ncap)
-			reflect.Copy(grown, val)
-			val.Set(grown)
-		}
-		n = val.Len()
-		val.SetLen(cnt)
+		n = dst.Len()
+		settable(dst).Grow(len(a.values))
+		dst.SetLen(n + len(a.values))
 	case reflect.Array:
-		if len(a.values) > val.Cap() {
-			panic(fmt.Errorf("plist: attempted to unmarshal %d values into an array of size %d", len(a.values), val.Cap()))
+		if len(a.values) > dst.Cap() {
+			panic(fmt.Errorf("plist: attempted to unmarshal %d values into an array of size %d", len(a.values), dst.Cap()))
 		}
 	default:
-		panic(&unmarshalTypeError{val.Type(), a.typeName()})
+		panic(&unmarshalTypeError{dst.Type(), a.typeName()})
 	}
 
 	// Recur to read element into slice.
 	for _, sval := range a.values {
-		d.unmarshal(sval, val.Index(n))
+		d.unmarshal(sval, dst.Index(n))
 		n++
 	}
 }
 
-func growSliceCap(c int) int {
-	switch {
-	case c == 0:
-		return 4
-	case c < 1024:
-		return c * 2 // Double for small slices
-	default:
-		return c + c/4 // Increase by 25% for large slices
-	}
-}
-
-func (d *Decoder) unmarshalDict(dict *cfDict, val reflect.Value) {
-	typ := val.Type()
-	switch val.Kind() {
+func (d *Decoder) unmarshalDict(dict *cfDict, dst reflect.Value) {
+	typ := dst.Type()
+	switch dst.Kind() {
 	case reflect.Struct:
-		tinfo, err := cachedFields(typ)
-		if err != nil {
-			panic(err)
-		}
-
 		entries := make(map[string]cfValue, len(dict.keys))
 		for i, k := range dict.keys {
 			sval := dict.values[i]
 			entries[k] = sval
 		}
 
-		for _, finfo := range tinfo.fields {
-			if ent, ok := entries[finfo.name]; ok {
-				d.unmarshal(ent, finfo.fieldForDecode(val))
+		for _, f := range cachedFields(typ) {
+			if ent, ok := entries[f.name]; ok {
+				d.unmarshal(ent, f.fieldForDecode(dst))
 			}
 		}
 	case reflect.Map:
-		if val.IsNil() {
-			settable(val).Set(reflect.MakeMap(typ))
+		if dst.IsNil() {
+			settable(dst).Set(reflect.MakeMap(typ))
 		}
 
-		if !stringType.ConvertibleTo(val.Type().Key()) {
-			panic(fmt.Errorf("plist: attempt to decode dictionary into map with non-string key type `%v'", val.Type().Key()))
+		if !stringType.ConvertibleTo(dst.Type().Key()) {
+			panic(fmt.Errorf("plist: attempt to decode dictionary into map with non-string key type `%v'", dst.Type().Key()))
 		}
 
 		for i, k := range dict.keys {
@@ -530,7 +490,7 @@ func (d *Decoder) unmarshalDict(dict *cfDict, val reflect.Value) {
 			mapElem := reflect.New(typ.Elem()).Elem()
 
 			d.unmarshal(sval, mapElem)
-			val.SetMapIndex(keyv, mapElem)
+			dst.SetMapIndex(keyv, mapElem)
 		}
 	default:
 		panic(&unmarshalTypeError{typ, dict.typeName()})
@@ -538,32 +498,32 @@ func (d *Decoder) unmarshalDict(dict *cfDict, val reflect.Value) {
 }
 
 /* *Interface is modeled after encoding/json */
-func (d *Decoder) valueInterface(pval cfValue) any {
-	switch pval := pval.(type) {
+func (d *Decoder) valueInterface(src cfValue) any {
+	switch src := src.(type) {
 	case cfString:
-		return string(pval)
+		return string(src)
 	case *cfInteger:
-		if pval.signed {
-			return int64(pval.value)
+		if src.signed {
+			return int64(src.value)
 		}
-		return pval.value
+		return src.value
 	case *cfReal:
-		if pval.is32 {
-			return float32(pval.value)
+		if src.is32 {
+			return float32(src.value)
 		}
-		return pval.value
+		return src.value
 	case cfBool:
-		return bool(pval)
+		return bool(src)
 	case *cfArray:
-		return d.arrayInterface(pval)
+		return d.arrayInterface(src)
 	case *cfDict:
-		return d.dictInterface(pval)
+		return d.dictInterface(src)
 	case cfData:
-		return []byte(pval)
+		return []byte(src)
 	case cfDate:
-		return time.Time(pval)
+		return time.Time(src)
 	case cfUID:
-		return UID(pval)
+		return UID(src)
 	}
 	return nil
 }
