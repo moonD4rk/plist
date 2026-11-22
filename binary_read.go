@@ -8,40 +8,46 @@ import (
 	"io"
 	"math"
 	"runtime"
+	"strings"
 	"time"
 	"unicode/utf16"
 )
 
-type binaryTrailer struct {
-	Unused            [5]uint8
-	SortVersion       uint8
-	OffsetIntSize     uint8
-	ObjectRefSize     uint8
-	NumObjects        uint64
-	TopObject         uint64
-	OffsetTableOffset uint64
-}
-
+// The high four bits of the byte an object starts with say what the object is.
 const (
-	markerNull        uint8 = 0x00
-	markerFalse         = 0x08
-	markerTrue          = 0x09
-	markerInt           = 0x10
-	markerReal              = 0x20
-	markerDate              = 0x30
-	markerData              = 0x40
-	markerASCII       = 0x50
-	markerUTF16       = 0x60
-	markerUID               = 0x80
-	markerArray             = 0xA0
-	markerDict        = 0xD0
+	markerNull  = 0x00
+	markerFalse = 0x08
+	markerTrue  = 0x09
+	markerInt   = 0x10
+	markerReal  = 0x20
+	markerDate  = 0x30
+	markerData  = 0x40
+	markerASCII = 0x50
+	markerUTF16 = 0x60
+	markerUID   = 0x80
+	markerArray = 0xA0
+	markerDict  = 0xD0
 )
 
 const (
+	binaryHeaderSize  = 8
+	binaryTrailerSize = 32
+
+	// Dates count seconds from 2001-01-01T00:00:00Z.
+	appleEpochOffset = 978307200
+
 	signedHighBits = 0xFFFFFFFFFFFFFFFF
 )
 
-type offset uint64
+var binaryMagic = []byte("bplist")
+
+type binaryTrailer struct {
+	offsetSize       uint8
+	refSize          uint8
+	objectCount      uint64
+	rootIndex        uint64
+	offsetTableStart uint64
+}
 
 // valueShape measures an object with every shared reference followed, which is how it gets unmarshaled.
 type valueShape struct {
@@ -50,53 +56,52 @@ type valueShape struct {
 }
 
 type binaryParser struct {
+	reader io.Reader
 	buffer []byte
 
-	reader        io.ReadSeeker
-	version       int
-	objects       []cfValue    // object ID to object
-	shapes        []valueShape // object ID to the shape of its object
-	trailer       binaryTrailer
+	trailer      binaryTrailer
 	trailerStart uint64
 
-	enclosing []offset // slice of object offsets; manipulated during container deserialization
+	objects   []cfValue    // by object ID
+	shapes    []valueShape // by object ID
+	enclosing []uint64     // offsets of the containers being read
 
 	budget uint64 // see valueBudget
 	work   uint64 // object references and bytes of strings and data read so far
 }
 
 func (p *binaryParser) validateTrailer() {
-	if p.trailer.OffsetTableOffset >= p.trailerStart {
-		panic(fmt.Errorf("offset table beyond beginning of trailer (0x%x, trailer@0x%x)", p.trailer.OffsetTableOffset, p.trailerStart))
+	if p.trailer.offsetTableStart >= p.trailerStart {
+		panic(fmt.Errorf("offset table beyond beginning of trailer (0x%x, trailer@0x%x)", p.trailer.offsetTableStart, p.trailerStart))
 	}
 
-	if p.trailer.OffsetTableOffset < 9 {
-		panic(fmt.Errorf("offset table begins inside header (0x%x)", p.trailer.OffsetTableOffset))
+	if p.trailer.offsetTableStart < 9 {
+		panic(fmt.Errorf("offset table begins inside header (0x%x)", p.trailer.offsetTableStart))
 	}
 
-	if p.trailerStart > (p.trailer.NumObjects*uint64(p.trailer.OffsetIntSize))+p.trailer.OffsetTableOffset {
+	if p.trailerStart > (p.trailer.objectCount*uint64(p.trailer.offsetSize))+p.trailer.offsetTableStart {
 		panic(errors.New("garbage between offset table and trailer"))
 	}
 
-	if p.trailer.OffsetTableOffset+(uint64(p.trailer.OffsetIntSize)*p.trailer.NumObjects) > p.trailerStart {
+	if p.trailer.offsetTableStart+(uint64(p.trailer.offsetSize)*p.trailer.objectCount) > p.trailerStart {
 		panic(errors.New("offset table isn't long enough to address every object"))
 	}
 
-	maxObjectRef := uint64(1) << (8 * p.trailer.ObjectRefSize)
-	if p.trailer.NumObjects > maxObjectRef {
-		panic(fmt.Errorf("more objects (%v) than object ref size (%v bytes) can support", p.trailer.NumObjects, p.trailer.ObjectRefSize))
+	maxObjectRef := uint64(1) << (8 * p.trailer.refSize)
+	if p.trailer.objectCount > maxObjectRef {
+		panic(fmt.Errorf("more objects (%v) than object ref size (%v bytes) can support", p.trailer.objectCount, p.trailer.refSize))
 	}
 
-	if p.trailer.OffsetIntSize < uint8(8) && (uint64(1)<<(8*p.trailer.OffsetIntSize)) <= p.trailer.OffsetTableOffset {
+	if p.trailer.offsetSize < uint8(8) && (uint64(1)<<(8*p.trailer.offsetSize)) <= p.trailer.offsetTableStart {
 		panic(errors.New("offset size isn't big enough to address entire file"))
 	}
 
-	if p.trailer.TopObject >= p.trailer.NumObjects {
-		panic(fmt.Errorf("top object #%d is out of range (only %d exist)", p.trailer.TopObject, p.trailer.NumObjects))
+	if p.trailer.rootIndex >= p.trailer.objectCount {
+		panic(fmt.Errorf("top object #%d is out of range (only %d exist)", p.trailer.rootIndex, p.trailer.objectCount))
 	}
 }
 
-func (p *binaryParser) parseDocument() (pval cfValue, parseError error) {
+func (p *binaryParser) parseDocument() (root cfValue, parseError error) {
 	defer func() {
 		if r := recover(); r != nil {
 			if _, ok := r.(runtime.Error); ok {
@@ -118,134 +123,110 @@ func (p *binaryParser) parseDocument() (pval cfValue, parseError error) {
 	}
 	p.buffer = buf
 
-	l := len(p.buffer)
-	if l < 40 {
+	if len(p.buffer) < binaryHeaderSize+binaryTrailerSize {
 		panic(errors.New("not enough data"))
 	}
 
-	if !bytes.Equal(p.buffer[0:6], []byte{'b', 'p', 'l', 'i', 's', 't'}) {
+	if !bytes.HasPrefix(p.buffer, binaryMagic) {
 		panic(errors.New("incomprehensible magic"))
 	}
 
-	p.version = int(((p.buffer[6] - '0') * 10) + (p.buffer[7] - '0'))
-
-	if p.version > 1 {
-		panic(fmt.Errorf("unexpected version %d", p.version))
+	version := int(((p.buffer[6] - '0') * 10) + (p.buffer[7] - '0'))
+	if version > 1 {
+		panic(fmt.Errorf("unexpected version %d", version))
 	}
 
-	p.trailerStart = uint64(l - 32)
+	p.trailerStart = uint64(len(p.buffer) - binaryTrailerSize)
+	trailer := p.buffer[p.trailerStart:]
 	p.trailer = binaryTrailer{
-		SortVersion:       p.buffer[p.trailerStart+5],
-		OffsetIntSize:     p.buffer[p.trailerStart+6],
-		ObjectRefSize:     p.buffer[p.trailerStart+7],
-		NumObjects:        binary.BigEndian.Uint64(p.buffer[p.trailerStart+8:]),
-		TopObject:         binary.BigEndian.Uint64(p.buffer[p.trailerStart+16:]),
-		OffsetTableOffset: binary.BigEndian.Uint64(p.buffer[p.trailerStart+24:]),
+		offsetSize:       trailer[6],
+		refSize:          trailer[7],
+		objectCount:      binary.BigEndian.Uint64(trailer[8:]),
+		rootIndex:        binary.BigEndian.Uint64(trailer[16:]),
+		offsetTableStart: binary.BigEndian.Uint64(trailer[24:]),
 	}
 
 	p.validateTrailer()
 
-	// INVARIANTS:
-	// - Entire offset table is before trailer
-	// - Offset table begins after header
-	// - Offset table can address entire document
-	// - Object IDs are big enough to support the number of objects in this plist
-	// - Top object is in range
-
-	p.objects = make([]cfValue, p.trailer.NumObjects)
-	p.shapes = make([]valueShape, p.trailer.NumObjects)
+	p.objects = make([]cfValue, p.trailer.objectCount)
+	p.shapes = make([]valueShape, p.trailer.objectCount)
 	p.budget = valueBudget(len(p.buffer))
 
-	pval = p.object(p.trailer.TopObject)
-	return pval, parseError
+	root = p.object(p.trailer.rootIndex)
+	return root, parseError
 }
 
 // readSizedInt returns a 128-bit integer as low64, high64
-func (p *binaryParser) readSizedInt(off offset, nbytes int) (lo, hi uint64, newOffset offset) {
+func (p *binaryParser) readSizedInt(off uint64, nbytes int) (lo, hi, next uint64) {
 	// Per comments in CoreFoundation, format version 00 requires that all
 	// 1, 2 or 4-byte integers be interpreted as unsigned. 8-byte integers are
 	// signed (always?) and therefore must be sign extended here.
 	// negative 1, 2, or 4-byte integers are always emitted as 64-bit.
 	switch nbytes {
 	case 1:
-		p.checkRange(off, 1) // runzero patch
-		lo, hi = uint64(p.buffer[off]), 0
+		p.checkRange(off, 1)
+		lo = uint64(p.buffer[off])
 	case 2:
-		p.checkRange(off, 2) // runzero patch
-		lo, hi = uint64(binary.BigEndian.Uint16(p.buffer[off:])), 0
+		p.checkRange(off, 2)
+		lo = uint64(binary.BigEndian.Uint16(p.buffer[off:]))
 	case 4:
-		p.checkRange(off, 4) // runzero patch
-		lo, hi = uint64(binary.BigEndian.Uint32(p.buffer[off:])), 0
+		p.checkRange(off, 4)
+		lo = uint64(binary.BigEndian.Uint32(p.buffer[off:]))
 	case 8:
-		p.checkRange(off, 8) // runzero patch
+		p.checkRange(off, 8)
 		lo = binary.BigEndian.Uint64(p.buffer[off:])
 		if p.buffer[off]&0x80 != 0 {
 			// sign extend if lo is signed
 			hi = signedHighBits
 		}
 	case 16:
-		p.checkRange(off, 16) // runzero patch
+		p.checkRange(off, 16)
 		lo, hi = binary.BigEndian.Uint64(p.buffer[off+8:]), binary.BigEndian.Uint64(p.buffer[off:])
 	default:
 		if nbytes > 8 {
 			panic(errors.New("illegal integer size"))
 		}
-		// runzero patch: the read is an 8-byte big-endian load
-		// ending at off+nbytes; its start is off-(8-nbytes). Reject if it would
-		// underflow before zero or extend past the buffer.
-		if offset(8-nbytes) > off {
+		// The integer is the low end of the eight bytes that stop where it stops.
+		pad := uint64(8 - nbytes)
+		if pad > off {
 			panic(fmt.Errorf("integer read at offset 0x%x underflows buffer", off))
 		}
-		p.checkRange(off-(8-offset(nbytes)), 8)
-		lo, hi = binary.BigEndian.Uint64(p.buffer[off-(8-offset(nbytes)):])&((1<<offset(nbytes*8))-1), 0
+		p.checkRange(off-pad, 8)
+		lo = binary.BigEndian.Uint64(p.buffer[off-pad:]) & ((1 << uint64(nbytes*8)) - 1)
 	}
-	newOffset = off + offset(nbytes)
-	return lo, hi, newOffset
+	return lo, hi, off + uint64(nbytes)
 }
 
-func (p *binaryParser) readRef(off offset) (uint64, offset) {
-	oid, _, next := p.readSizedInt(off, int(p.trailer.ObjectRefSize))
-	return oid, next
-}
-
-func (p *binaryParser) readOffset(off offset) (offset, offset) {
-	parsedOffset, _, next := p.readSizedInt(off, int(p.trailer.OffsetIntSize))
-	return offset(parsedOffset), next
+func (p *binaryParser) readRef(off uint64) (index, next uint64) {
+	index, _, next = p.readSizedInt(off, int(p.trailer.refSize))
+	return index, next
 }
 
 func (p *binaryParser) object(index uint64) cfValue {
-	if index >= p.trailer.NumObjects {
-		panic(fmt.Errorf("invalid object#%d (max %d)", index, p.trailer.NumObjects))
+	if index >= p.trailer.objectCount {
+		panic(fmt.Errorf("invalid object#%d (max %d)", index, p.trailer.objectCount))
 	}
 
-	if pval := p.objects[index]; pval != nil {
-		return pval
+	if cached := p.objects[index]; cached != nil {
+		return cached
 	}
 
-	off, _ := p.readOffset(offset(p.trailer.OffsetTableOffset + (index * uint64(p.trailer.OffsetIntSize))))
-	if off > offset(p.trailer.OffsetTableOffset-1) {
-		panic(fmt.Errorf("object#%d starts beyond beginning of object table (0x%x, table@0x%x)", index, off, p.trailer.OffsetTableOffset))
+	off, _, _ := p.readSizedInt(p.trailer.offsetTableStart+(index*uint64(p.trailer.offsetSize)), int(p.trailer.offsetSize))
+	if off > p.trailer.offsetTableStart-1 {
+		panic(fmt.Errorf("object#%d starts beyond beginning of object table (0x%x, table@0x%x)", index, off, p.trailer.offsetTableStart))
 	}
 
-	pval, shape := p.readObject(off)
-	p.objects[index] = pval
+	value, shape := p.readObject(off)
+	p.objects[index] = value
 	p.shapes[index] = shape
-	return pval
+	return value
 }
 
-// checkRange panics with a (recoverable, non-runtime) parse error if the
-// half-open byte range [start, start+length) is not fully contained within the
-// parsed buffer. runzero patch: every offset/length read derived
-// from attacker-controlled offset-table or count fields must be bounds-checked
-// before slicing so a crafted bplist cannot trigger an out-of-bounds slice
-// panic (which the package deliberately re-throws past Decode as a runtime
-// error). Using uint64 math throughout avoids wraparound on near-overflow
-// values.
-func (p *binaryParser) checkRange(start offset, length uint64) {
-	bufLen := uint64(len(p.buffer))
-	s := uint64(start)
-	if s > bufLen || length > bufLen-s {
-		panic(fmt.Errorf("read of %d bytes at offset 0x%x exceeds buffer length %d", length, s, bufLen))
+// checkRange fails before a slice expression can: an out-of-range slice is a runtime panic, which Decode passes on.
+func (p *binaryParser) checkRange(start, length uint64) {
+	size := uint64(len(p.buffer))
+	if start > size || length > size-start {
+		panic(fmt.Errorf("read of %d bytes at offset 0x%x exceeds buffer length %d", length, start, size))
 	}
 }
 
@@ -257,39 +238,32 @@ func (p *binaryParser) charge(n uint64) {
 	}
 }
 
-func (p *binaryParser) enter(off offset) {
-	// runzero patch: bound container-nesting depth. The existing
-	// loop only rejects an exact self-reference already on the stack; a chain
-	// of N distinct nested containers would otherwise recurse N deep and can
-	// overflow the goroutine stack (an unrecoverable fatal error) on a small
-	// crafted binary plist. containerStack length is the current depth.
+func (p *binaryParser) enter(off uint64) {
 	if len(p.enclosing) >= maxParseDepth {
 		panic(errMaxDepthExceeded)
 	}
-	for _, v := range p.enclosing {
-		if v == off {
+	for _, outer := range p.enclosing {
+		if outer == off {
 			p.failSelfReference(off)
 		}
 	}
 	p.enclosing = append(p.enclosing, off)
 }
 
-func (p *binaryParser) failSelfReference(off offset) {
-	ids := ""
-	for _, v := range p.enclosing {
-		ids += fmt.Sprintf("0x%x > ", v)
+func (p *binaryParser) failSelfReference(off uint64) {
+	var chain strings.Builder
+	for _, outer := range p.enclosing {
+		fmt.Fprintf(&chain, "0x%x > ", outer)
 	}
-
-	// %s0x%x: ids above ends with " > "
-	panic(fmt.Errorf("self-referential collection@0x%x (%s0x%x) cannot be deserialized", off, ids, off))
+	panic(fmt.Errorf("self-referential collection@0x%x (%s0x%x) cannot be deserialized", off, chain.String(), off))
 }
 
 func (p *binaryParser) leave() {
 	p.enclosing = p.enclosing[:len(p.enclosing)-1]
 }
 
-func (p *binaryParser) readObject(off offset) (cfValue, valueShape) {
-	p.checkRange(off, 1) // runzero patch
+func (p *binaryParser) readObject(off uint64) (cfValue, valueShape) {
+	p.checkRange(off, 1)
 
 	switch p.buffer[off] & 0xF0 {
 	case markerDict:
@@ -300,14 +274,13 @@ func (p *binaryParser) readObject(off offset) (cfValue, valueShape) {
 	return p.readScalar(off), valueShape{values: 1}
 }
 
-func (p *binaryParser) readScalar(off offset) cfValue {
-	tag := p.buffer[off]
+func (p *binaryParser) readScalar(off uint64) cfValue {
+	marker := p.buffer[off]
 
-	switch tag & 0xF0 {
+	switch marker & 0xF0 {
 	case markerNull:
-		switch tag & 0x0F {
-		case markerTrue, markerFalse:
-			return cfBool(tag == markerTrue)
+		if marker == markerTrue || marker == markerFalse {
+			return cfBool(marker == markerTrue)
 		}
 	case markerInt:
 		lo, hi, _ := p.readInt(off)
@@ -316,75 +289,59 @@ func (p *binaryParser) readScalar(off offset) cfValue {
 			value:  lo,
 		}
 	case markerReal:
-		nbytes := 1 << (tag & 0x0F)
-		switch nbytes {
+		switch 1 << (marker & 0x0F) {
 		case 4:
-			p.checkRange(off+1, 4) // runzero patch
+			p.checkRange(off+1, 4)
 			bits := binary.BigEndian.Uint32(p.buffer[off+1:])
 			return &cfReal{is32: true, value: float64(math.Float32frombits(bits))}
 		case 8:
-			p.checkRange(off+1, 8) // runzero patch
+			p.checkRange(off+1, 8)
 			bits := binary.BigEndian.Uint64(p.buffer[off+1:])
 			return &cfReal{value: math.Float64frombits(bits)}
 		}
 		panic(errors.New("illegal float size"))
 	case markerDate:
-		p.checkRange(off+1, 8) // runzero patch
-		bits := binary.BigEndian.Uint64(p.buffer[off+1:])
-		val := math.Float64frombits(bits)
-
-		// Apple Epoch is 20010101000000Z
-		// Adjust for UNIX Time
-		val += 978307200
-
-		sec, fsec := math.Modf(val)
-		tm := time.Unix(int64(sec), int64(fsec*float64(time.Second))).In(time.UTC)
-		return cfDate(tm)
+		p.checkRange(off+1, 8)
+		seconds := math.Float64frombits(binary.BigEndian.Uint64(p.buffer[off+1:])) + appleEpochOffset
+		sec, frac := math.Modf(seconds)
+		return cfDate(time.Unix(int64(sec), int64(frac*float64(time.Second))).In(time.UTC))
 	case markerData:
-		data := p.readData(off)
-		return cfData(data)
+		return cfData(p.readData(off))
 	case markerASCII:
-		str := p.readASCII(off)
-		return cfString(str)
+		return cfString(p.readASCII(off))
 	case markerUTF16:
-		str := p.readUTF16(off)
-		return cfString(str)
+		return cfString(p.readUTF16(off))
 	case markerUID: // Somehow different than int: low half is nbytes - 1 instead of log2(nbytes)
-		lo, _, _ := p.readSizedInt(off+1, int(tag&0xF)+1)
+		lo, _, _ := p.readSizedInt(off+1, int(marker&0xF)+1)
 		return cfUID(lo)
 	}
-	panic(fmt.Errorf("unexpected atom 0x%2.02x at offset 0x%x", tag, off))
+	panic(fmt.Errorf("unexpected atom 0x%2.02x at offset 0x%x", marker, off))
 }
 
-func (p *binaryParser) readInt(off offset) (uint64, uint64, offset) {
-	tag := p.buffer[off]
-	return p.readSizedInt(off+1, 1<<(tag&0xF))
+func (p *binaryParser) readInt(off uint64) (lo, hi, next uint64) {
+	marker := p.buffer[off]
+	return p.readSizedInt(off+1, 1<<(marker&0xF))
 }
 
-func (p *binaryParser) readCount(off offset) (uint64, offset) {
-	tag := p.buffer[off]
-	cnt := uint64(tag & 0x0F)
-	if cnt == 0xF {
-		cnt, _, off = p.readInt(off + 1)
-		// runzero patch: an extended count is an attacker-controlled 8-byte
-		// integer. A real element/byte count can never exceed the object region
-		// (which ends at OffsetTableOffset), so reject larger values HERE, before
-		// any downstream count*K / start+count arithmetic can wrap uint64 and
-		// slip a huge length past the per-consumer bounds checks into
-		// make()/slice/unsafe.String — an unrecoverable runtime panic that
-		// escapes Decode's recover and crashes the caller.
-		if cnt > p.trailer.OffsetTableOffset {
-			panic(fmt.Errorf("element count %d at offset 0x%x exceeds object region (table@0x%x)", cnt, off, p.trailer.OffsetTableOffset))
-		}
-		return cnt, off
+func (p *binaryParser) readCount(off uint64) (count, start uint64) {
+	marker := p.buffer[off]
+	count = uint64(marker & 0x0F)
+	if count != 0xF {
+		return count, off + 1
 	}
-	return cnt, off + 1
+
+	count, _, start = p.readInt(off + 1)
+	// A count cannot exceed the object region. Rejecting it here keeps the sums and products computed from it from wrapping.
+	if count > p.trailer.offsetTableStart {
+		panic(fmt.Errorf("element count %d at offset 0x%x exceeds object region (table@0x%x)", count, start, p.trailer.offsetTableStart))
+	}
+	return count, start
 }
 
-func (p *binaryParser) readData(off offset) []byte {
+func (p *binaryParser) readData(off uint64) []byte {
 	count, start := p.readCount(off)
-	if start+offset(count) > offset(p.trailer.OffsetTableOffset) {
-		panic(fmt.Errorf("data@0x%x too long (%v bytes, max is %v)", off, count, p.trailer.OffsetTableOffset-uint64(start)))
+	if start+count > p.trailer.offsetTableStart {
+		panic(fmt.Errorf("data@0x%x too long (%v bytes, max is %v)", off, count, p.trailer.offsetTableStart-start))
 	}
 	p.charge(count)
 	// The copy has no spare capacity, so appending to it cannot write into memory another reference sees.
@@ -393,48 +350,47 @@ func (p *binaryParser) readData(off offset) []byte {
 	return data
 }
 
-func (p *binaryParser) readASCII(off offset) string {
+func (p *binaryParser) readASCII(off uint64) string {
 	count, start := p.readCount(off)
-	if start+offset(count) > offset(p.trailer.OffsetTableOffset) {
-		panic(fmt.Errorf("ascii string@0x%x too long (%v bytes, max is %v)", off, count, p.trailer.OffsetTableOffset-uint64(start)))
+	if start+count > p.trailer.offsetTableStart {
+		panic(fmt.Errorf("ascii string@0x%x too long (%v bytes, max is %v)", off, count, p.trailer.offsetTableStart-start))
 	}
 
 	p.charge(count)
-	return string(p.buffer[start : start+offset(count)])
+	return string(p.buffer[start : start+count])
 }
 
-func (p *binaryParser) readUTF16(off offset) string {
+func (p *binaryParser) readUTF16(off uint64) string {
 	count, start := p.readCount(off)
-	byteLen := count * 2
-	if start+offset(byteLen) > offset(p.trailer.OffsetTableOffset) {
-		panic(fmt.Errorf("utf16 string@0x%x too long (%v bytes, max is %v)", off, byteLen, p.trailer.OffsetTableOffset-uint64(start)))
+	size := count * 2
+	if start+size > p.trailer.offsetTableStart {
+		panic(fmt.Errorf("utf16 string@0x%x too long (%v bytes, max is %v)", off, size, p.trailer.offsetTableStart-start))
 	}
 
-	p.charge(byteLen)
-	u16s := make([]uint16, count)
-	for i := offset(0); i < offset(count); i++ {
-		u16s[i] = binary.BigEndian.Uint16(p.buffer[start+(i*2):])
+	p.charge(size)
+	units := make([]uint16, count)
+	for i := range units {
+		units[i] = binary.BigEndian.Uint16(p.buffer[start+uint64(i)*2:])
 	}
-	runes := utf16.Decode(u16s)
-	return string(runes)
+	return string(utf16.Decode(units))
 }
 
 // Charging references as they are read bounds parsing; limiting the shape bounds unmarshaling.
-func (p *binaryParser) readObjectList(off offset, count uint64) ([]cfValue, valueShape) {
-	if off+offset(count*uint64(p.trailer.ObjectRefSize)) > offset(p.trailer.OffsetTableOffset) {
-		panic(fmt.Errorf("list@0x%x length (%v) puts its end beyond the offset table at 0x%x", off, count, p.trailer.OffsetTableOffset))
+func (p *binaryParser) readObjectList(off, count uint64) ([]cfValue, valueShape) {
+	if off+(count*uint64(p.trailer.refSize)) > p.trailer.offsetTableStart {
+		panic(fmt.Errorf("list@0x%x length (%v) puts its end beyond the offset table at 0x%x", off, count, p.trailer.offsetTableStart))
 	}
 	p.charge(count)
 	objects := make([]cfValue, count)
 	shape := valueShape{values: 1}
 
 	next := off
-	var oid uint64
-	for i := uint64(0); i < count; i++ {
-		oid, next = p.readRef(next)
-		objects[i] = p.object(oid)
+	var index uint64
+	for i := range objects {
+		index, next = p.readRef(next)
+		objects[i] = p.object(index)
 
-		child := p.shapes[oid]
+		child := p.shapes[index]
 		shape.values += child.values
 		if shape.values > p.budget {
 			panic(errTooManyValues)
@@ -451,39 +407,39 @@ func (p *binaryParser) readObjectList(off offset, count uint64) ([]cfValue, valu
 	return objects, shape
 }
 
-func (p *binaryParser) readDict(off offset) (*cfDict, valueShape) {
+func (p *binaryParser) readDict(off uint64) (*cfDict, valueShape) {
 	p.enter(off)
 	defer p.leave()
 
 	// A dictionary is an object list of [keys... values...].
-	cnt, start := p.readCount(off)
-	objects, shape := p.readObjectList(start, cnt*2)
+	count, start := p.readCount(off)
+	objects, shape := p.readObjectList(start, count*2)
 
-	keys := make([]string, cnt)
-	for i := uint64(0); i < cnt; i++ {
-		if str, ok := objects[i].(cfString); ok {
-			keys[i] = string(str)
-		} else {
+	keys := make([]string, count)
+	for i := range keys {
+		key, ok := objects[i].(cfString)
+		if !ok {
 			panic(fmt.Errorf("dictionary@0x%x contains non-string key at index %d", off, i))
 		}
+		keys[i] = string(key)
 	}
 
 	return &cfDict{
 		keys:   keys,
-		values: objects[cnt:],
+		values: objects[count:],
 	}, shape
 }
 
-func (p *binaryParser) readArray(off offset) (*cfArray, valueShape) {
+func (p *binaryParser) readArray(off uint64) (*cfArray, valueShape) {
 	p.enter(off)
 	defer p.leave()
 
 	// an array is just an object list
-	cnt, start := p.readCount(off)
-	objects, shape := p.readObjectList(start, cnt)
+	count, start := p.readCount(off)
+	objects, shape := p.readObjectList(start, count)
 	return &cfArray{objects}, shape
 }
 
-func newBinaryParser(r io.ReadSeeker) *binaryParser {
+func newBinaryParser(r io.Reader) *binaryParser {
 	return &binaryParser{reader: r}
 }

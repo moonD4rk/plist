@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"time"
 	"unicode/utf16"
 )
@@ -22,43 +23,117 @@ func minIntSize(n uint64) int {
 	}
 }
 
-func isUniqued(pval cfValue) bool {
-	switch pval.(type) {
+func isUniqued(value cfValue) bool {
+	switch value.(type) {
 	case cfString, *cfInteger, *cfReal, cfDate, cfData:
 		return true
 	}
 	return false
 }
 
-type binaryWriter struct {
-	writer   *countedWriter
-	indexByKey   map[any]uint64 // maps cfValue.hash() to the index of the value in objtable
-	objects []cfValue
-	trailer  binaryTrailer
+// realKey compares bit patterns: compared as numbers, NaN never equals itself and -0 equals +0.
+type realKey struct {
+	is32 bool
+	bits uint64
 }
 
-func (w *binaryWriter) flatten(pval cfValue) {
-	key := pval.hash()
-	if isUniqued(pval) {
-		if _, ok := w.indexByKey[key]; ok {
+func realKeyOf(r *cfReal) realKey {
+	if r.is32 {
+		return realKey{is32: true, bits: uint64(math.Float32bits(float32(r.value)))}
+	}
+	return realKey{bits: math.Float64bits(r.value)}
+}
+
+type binaryWriter struct {
+	out     io.Writer
+	written uint64
+
+	objects []cfValue
+	refSize int
+
+	// Object IDs by value. The first five kinds are stored once per distinct value.
+	strings  map[string]uint64
+	data     map[string]uint64
+	integers map[cfInteger]uint64
+	reals    map[realKey]uint64
+	dates    map[time.Time]uint64
+	// Containers by identity; booleans and UIDs by value, stored per occurrence with the last one winning.
+	others map[cfValue]uint64
+
+	scratch [8]byte // for the bytes of one marker or integer, so that writing them does not allocate
+}
+
+func (w *binaryWriter) indexOf(value cfValue) (index uint64, ok bool) {
+	switch value := value.(type) {
+	case cfString:
+		index, ok = w.strings[string(value)]
+	case cfData:
+		index, ok = w.data[string(value)]
+	case *cfInteger:
+		index, ok = w.integers[*value]
+	case *cfReal:
+		index, ok = w.reals[realKeyOf(value)]
+	case cfDate:
+		index, ok = w.dates[time.Time(value)]
+	default:
+		index, ok = w.others[value]
+	}
+	return index, ok
+}
+
+func (w *binaryWriter) add(value cfValue) {
+	index := uint64(len(w.objects))
+	w.objects = append(w.objects, value)
+
+	switch value := value.(type) {
+	case cfString:
+		w.strings[string(value)] = index
+	case cfData:
+		// The key views the bytes instead of copying them; they do not change while the document is written.
+		w.data[zeroCopy8BitString(value, 0, len(value))] = index
+	case *cfInteger:
+		w.integers[*value] = index
+	case *cfReal:
+		w.reals[realKeyOf(value)] = index
+	case cfDate:
+		w.dates[time.Time(value)] = index
+	default:
+		w.others[value] = index
+	}
+}
+
+func (w *binaryWriter) write(b []byte) {
+	n, err := w.out.Write(b)
+	w.written += uint64(n)
+	if err != nil {
+		panic(err)
+	}
+}
+
+func (w *binaryWriter) writeByte(b byte) {
+	w.scratch[0] = b
+	w.write(w.scratch[:1])
+}
+
+func (w *binaryWriter) flatten(value cfValue) {
+	if isUniqued(value) {
+		if _, ok := w.indexOf(value); ok {
 			return
 		}
 	}
+	w.add(value)
 
-	w.indexByKey[key] = uint64(len(w.objects))
-	w.objects = append(w.objects, pval)
-
-	switch pval := pval.(type) {
+	switch value := value.(type) {
 	case *cfDict:
-		pval.sort()
-		for _, k := range pval.keys {
+		value.sort()
+		for _, k := range value.keys {
 			w.flatten(cfString(k))
 		}
-		for _, v := range pval.values {
+		for _, v := range value.values {
 			w.flatten(v)
 		}
 	case *cfArray:
-		for _, v := range pval.values {
+		for _, v := range value.values {
 			if v != nil {
 				w.flatten(v)
 			}
@@ -66,245 +141,230 @@ func (w *binaryWriter) flatten(pval cfValue) {
 	}
 }
 
-func (w *binaryWriter) indexOf(pval cfValue) (uint64, bool) {
-	v, ok := w.indexByKey[pval.hash()]
-	return v, ok
-}
-
 func (w *binaryWriter) generateDocument(root cfValue) {
 	w.objects = make([]cfValue, 0, 16)
-	w.indexByKey = make(map[any]uint64)
+	w.strings = make(map[string]uint64)
+	w.data = make(map[string]uint64)
+	w.integers = make(map[cfInteger]uint64)
+	w.reals = make(map[realKey]uint64)
+	w.dates = make(map[time.Time]uint64)
+	w.others = make(map[cfValue]uint64)
 	w.flatten(root)
 
-	w.trailer.NumObjects = uint64(len(w.objects))
-	w.trailer.ObjectRefSize = uint8(minIntSize(w.trailer.NumObjects))
+	trailer := binaryTrailer{objectCount: uint64(len(w.objects))}
+	w.refSize = minIntSize(trailer.objectCount)
+	trailer.refSize = uint8(w.refSize)
 
-	w.writer.Write([]byte("bplist00"))
+	w.write([]byte("bplist00"))
 
-	offsets := make([]uint64, w.trailer.NumObjects)
-	for i, pval := range w.objects {
-		offsets[i] = uint64(w.writer.BytesWritten())
-		w.writeObject(pval)
+	offsets := make([]uint64, len(w.objects))
+	for i, object := range w.objects {
+		offsets[i] = w.written
+		w.writeObject(object)
 	}
 
-	w.trailer.OffsetIntSize = uint8(minIntSize(uint64(w.writer.BytesWritten())))
-	w.trailer.TopObject = w.indexByKey[root.hash()]
-	w.trailer.OffsetTableOffset = uint64(w.writer.BytesWritten())
+	trailer.offsetSize = uint8(minIntSize(w.written))
+	trailer.rootIndex, _ = w.indexOf(root)
+	trailer.offsetTableStart = w.written
 
 	for _, offset := range offsets {
-		w.writeSizedInt(offset, int(w.trailer.OffsetIntSize))
+		w.writeSizedInt(offset, int(trailer.offsetSize))
 	}
-
-	binary.Write(w.writer, binary.BigEndian, w.trailer)
+	w.writeTrailer(trailer)
 }
 
-func (w *binaryWriter) writeObject(pval cfValue) {
-	if pval == nil {
+func (w *binaryWriter) writeTrailer(trailer binaryTrailer) {
+	var b [binaryTrailerSize]byte
+	b[6] = trailer.offsetSize
+	b[7] = trailer.refSize
+	binary.BigEndian.PutUint64(b[8:], trailer.objectCount)
+	binary.BigEndian.PutUint64(b[16:], trailer.rootIndex)
+	binary.BigEndian.PutUint64(b[24:], trailer.offsetTableStart)
+	w.write(b[:])
+}
+
+func (w *binaryWriter) writeObject(value cfValue) {
+	if value == nil {
 		return
 	}
 
-	switch pval := pval.(type) {
+	switch value := value.(type) {
 	case *cfDict:
-		w.writeDict(pval)
+		w.writeDict(value)
 	case *cfArray:
-		w.writeArray(pval.values)
+		w.writeArray(value.values)
 	case cfString:
-		w.writeString(string(pval))
+		w.writeString(string(value))
 	case *cfInteger:
-		w.writeInt(pval.signed, pval.value)
+		w.writeInt(value.signed, value.value)
 	case *cfReal:
-		if pval.is32 {
-			w.writeReal(pval.value, 32)
-		} else {
-			w.writeReal(pval.value, 64)
-		}
+		w.writeReal(value)
 	case cfBool:
-		w.writeBool(bool(pval))
+		w.writeBool(bool(value))
 	case cfData:
-		w.writeData([]byte(pval))
+		w.writeData([]byte(value))
 	case cfDate:
-		w.writeDate(time.Time(pval))
+		w.writeDate(time.Time(value))
 	case cfUID:
-		w.writeUID(UID(pval))
+		w.writeUID(UID(value))
 	default:
-		panic(fmt.Errorf("unknown plist type %T", pval))
+		panic(fmt.Errorf("unknown plist type %T", value))
 	}
 }
 
 func (w *binaryWriter) writeSizedInt(n uint64, nbytes int) {
-	var val any
 	switch nbytes {
-	case 1:
-		val = uint8(n)
-	case 2:
-		val = uint16(n)
-	case 4:
-		val = uint32(n)
-	case 8:
-		val = n
+	case 1, 2, 4, 8:
+		binary.BigEndian.PutUint64(w.scratch[:], n)
+		w.write(w.scratch[8-nbytes:])
 	default:
 		panic(errors.New("illegal integer size"))
 	}
-	binary.Write(w.writer, binary.BigEndian, val)
 }
 
 func (w *binaryWriter) writeBool(v bool) {
-	tag := uint8(markerFalse)
 	if v {
-		tag = markerTrue
+		w.writeByte(markerTrue)
+	} else {
+		w.writeByte(markerFalse)
 	}
-	binary.Write(w.writer, binary.BigEndian, tag)
 }
 
 func (w *binaryWriter) writeInt(signed bool, n uint64) {
-	var tag uint8
-	var val any
 	switch {
 	case n <= uint64(0xff):
-		val = uint8(n)
-		tag = markerInt | 0x0
+		w.writeByte(markerInt | 0x0)
+		w.writeSizedInt(n, 1)
 	case n <= uint64(0xffff):
-		val = uint16(n)
-		tag = markerInt | 0x1
+		w.writeByte(markerInt | 0x1)
+		w.writeSizedInt(n, 2)
 	case n <= uint64(0xffffffff):
-		val = uint32(n)
-		tag = markerInt | 0x2
+		w.writeByte(markerInt | 0x2)
+		w.writeSizedInt(n, 4)
 	case n > uint64(0x7fffffffffffffff) && !signed:
-		// 64-bit values are always *signed* in format 00.
-		// Any unsigned value that doesn't intersect with the signed
-		// range must be sign-extended and stored as a SInt128
-		val = n
-		tag = markerInt | 0x4
+		// Eight bytes are read as a signed integer, so a larger unsigned one takes sixteen with the high half zero.
+		w.writeByte(markerInt | 0x4)
+		w.writeSizedInt(0, 8)
+		w.writeSizedInt(n, 8)
 	default:
-		val = n
-		tag = markerInt | 0x3
+		w.writeByte(markerInt | 0x3)
+		w.writeSizedInt(n, 8)
 	}
-
-	binary.Write(w.writer, binary.BigEndian, tag)
-	if tag&0xF == 0x4 {
-		// SInt128; in the absence of true 128-bit integers in Go,
-		// we'll just fake the top half. We only got here because
-		// we had an unsigned 64-bit int that didn't fit,
-		// so sign extend it with zeroes.
-		binary.Write(w.writer, binary.BigEndian, uint64(0))
-	}
-	binary.Write(w.writer, binary.BigEndian, val)
 }
 
 func (w *binaryWriter) writeUID(u UID) {
 	nbytes := minIntSize(uint64(u))
-	tag := uint8(markerUID | (nbytes - 1))
-
-	binary.Write(w.writer, binary.BigEndian, tag)
+	w.writeByte(uint8(markerUID | (nbytes - 1)))
 	w.writeSizedInt(uint64(u), nbytes)
 }
 
-func (w *binaryWriter) writeReal(n float64, bits int) {
-	var tag uint8 = markerReal | 0x3
-	var val any = n
-	if bits == 32 {
-		val = float32(n)
-		tag = markerReal | 0x2
+func (w *binaryWriter) writeReal(r *cfReal) {
+	if r.is32 {
+		w.writeByte(markerReal | 0x2)
+		w.writeSizedInt(uint64(math.Float32bits(float32(r.value))), 4)
+		return
 	}
-
-	binary.Write(w.writer, binary.BigEndian, tag)
-	binary.Write(w.writer, binary.BigEndian, val)
+	w.writeByte(markerReal | 0x3)
+	w.writeSizedInt(math.Float64bits(r.value), 8)
 }
 
 func (w *binaryWriter) writeDate(t time.Time) {
-	tag := uint8(markerDate) | 0x3
-	val := float64(t.Unix()) + float64(t.Nanosecond())/float64(time.Second)
+	seconds := float64(t.Unix()) + float64(t.Nanosecond())/float64(time.Second)
 	// UnixNano overflows outside the years 1678 to 2262; inside them it keeps the output of earlier releases.
 	if nano := t.UnixNano(); time.Unix(0, nano).Equal(t) {
-		val = float64(nano) / float64(time.Second)
+		seconds = float64(nano) / float64(time.Second)
 	}
-	val -= 978307200 // Adjust to Apple Epoch
+	seconds -= appleEpochOffset
 
-	binary.Write(w.writer, binary.BigEndian, tag)
-	binary.Write(w.writer, binary.BigEndian, val)
+	w.writeByte(markerDate | 0x3)
+	w.writeSizedInt(math.Float64bits(seconds), 8)
 }
 
-func (w *binaryWriter) writeMarker(tag uint8, count uint64) {
-	marker := tag
-	if count >= 0xF {
-		marker |= 0xF
-	} else {
-		marker |= uint8(count)
+func (w *binaryWriter) writeMarker(marker uint8, count uint64) {
+	if count < 0xF {
+		w.writeByte(marker | uint8(count))
+		return
 	}
-
-	binary.Write(w.writer, binary.BigEndian, marker)
-
-	if count >= 0xF {
-		w.writeInt(false, count)
-	}
+	w.writeByte(marker | 0xF)
+	w.writeInt(false, count)
 }
 
 func (w *binaryWriter) writeData(data []byte) {
 	w.writeMarker(markerData, uint64(len(data)))
-	binary.Write(w.writer, binary.BigEndian, data)
+	w.write(data)
+}
+
+func isASCII(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] > 0x7F {
+			return false
+		}
+	}
+	return true
 }
 
 func (w *binaryWriter) writeString(str string) {
-	for _, r := range str {
-		if r > 0x7F {
-			utf16Runes := utf16.Encode([]rune(str))
-			w.writeMarker(markerUTF16, uint64(len(utf16Runes)))
-			binary.Write(w.writer, binary.BigEndian, utf16Runes)
-			return
-		}
+	if isASCII(str) {
+		w.writeMarker(markerASCII, uint64(len(str)))
+		w.write([]byte(str))
+		return
 	}
 
-	w.writeMarker(markerASCII, uint64(len(str)))
-	binary.Write(w.writer, binary.BigEndian, []byte(str))
+	units := utf16.Encode([]rune(str))
+	w.writeMarker(markerUTF16, uint64(len(units)))
+
+	b := make([]byte, 2*len(units))
+	for i, unit := range units {
+		binary.BigEndian.PutUint16(b[2*i:], unit)
+	}
+	w.write(b)
 }
 
 func (w *binaryWriter) writeDict(dict *cfDict) {
-	// assumption: sorted already; flattenPlistValue did this.
-	cnt := len(dict.keys)
-	w.writeMarker(markerDict, uint64(cnt))
-	vals := make([]uint64, cnt*2)
+	// assumption: sorted already; flatten did this.
+	count := len(dict.keys)
+	w.writeMarker(markerDict, uint64(count))
+	refs := make([]uint64, count*2)
 	for i, k := range dict.keys {
-		// invariant: keys have already been "uniqued" (as PStrings)
-		keyIdx, ok := w.indexByKey[cfString(k).hash()]
+		index, ok := w.indexOf(cfString(k))
 		if !ok {
 			panic(errors.New("failed to find key " + k + " in object map during serialization"))
 		}
-		vals[i] = keyIdx
+		refs[i] = index
 	}
 
 	for i, v := range dict.values {
-		// invariant: values have already been "uniqued"
-		objIdx, ok := w.indexOf(v)
+		index, ok := w.indexOf(v)
 		if !ok {
 			panic(errors.New("failed to find value in object map during serialization"))
 		}
-		vals[i+cnt] = objIdx
+		refs[i+count] = index
 	}
 
-	for _, v := range vals {
-		w.writeSizedInt(v, int(w.trailer.ObjectRefSize))
+	for _, ref := range refs {
+		w.writeSizedInt(ref, w.refSize)
 	}
 }
 
-func (w *binaryWriter) writeArray(arr []cfValue) {
+func (w *binaryWriter) writeArray(values []cfValue) {
 	count := 0
-	for _, v := range arr {
+	for _, v := range values {
 		if v != nil {
 			count++
 		}
 	}
 
 	w.writeMarker(markerArray, uint64(count))
-	for _, v := range arr {
+	for _, v := range values {
 		if v == nil {
 			continue
 		}
-		objIdx, ok := w.indexOf(v)
+		index, ok := w.indexOf(v)
 		if !ok {
 			panic(errors.New("failed to find value in object map during serialization"))
 		}
 
-		w.writeSizedInt(objIdx, int(w.trailer.ObjectRefSize))
+		w.writeSizedInt(index, w.refSize)
 	}
 }
 
@@ -313,7 +373,5 @@ func (w *binaryWriter) Indent(i string) {
 }
 
 func newBinaryWriter(w io.Writer) *binaryWriter {
-	return &binaryWriter{
-		writer: &countedWriter{Writer: mustWriter{w}},
-	}
+	return &binaryWriter{out: w}
 }
