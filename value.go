@@ -1,7 +1,6 @@
 package plist
 
 import (
-	"math"
 	"sort"
 	"strconv"
 	"time"
@@ -13,7 +12,6 @@ const cfUIDMagic = "CF$UID"
 
 type cfValue interface {
 	typeName() string
-	hash() any
 }
 
 type cfDict struct {
@@ -23,10 +21,6 @@ type cfDict struct {
 
 func (*cfDict) typeName() string {
 	return "dictionary"
-}
-
-func (d *cfDict) hash() any {
-	return d
 }
 
 func (d *cfDict) Len() int {
@@ -72,18 +66,10 @@ func (*cfArray) typeName() string {
 	return "array"
 }
 
-func (a *cfArray) hash() any {
-	return a
-}
-
 type cfString string
 
 func (cfString) typeName() string {
 	return "string"
-}
-
-func (s cfString) hash() any {
-	return string(s)
 }
 
 type cfInteger struct {
@@ -95,13 +81,6 @@ func (*cfInteger) typeName() string {
 	return "integer"
 }
 
-func (n *cfInteger) hash() any {
-	if n.signed {
-		return int64(n.value)
-	}
-	return n.value
-}
-
 type cfReal struct {
 	is32  bool
 	value float64
@@ -111,37 +90,16 @@ func (cfReal) typeName() string {
 	return "real"
 }
 
-// realKey compares bit patterns: as a map key NaN never equals itself and -0 equals +0.
-type realKey struct {
-	bits uint64
-	is32 bool
-}
-
-func (r *cfReal) hash() any {
-	if r.is32 {
-		return realKey{bits: uint64(math.Float32bits(float32(r.value))), is32: true}
-	}
-	return realKey{bits: math.Float64bits(r.value)}
-}
-
 type cfBool bool
 
 func (cfBool) typeName() string {
 	return "boolean"
 }
 
-func (b cfBool) hash() any {
-	return bool(b)
-}
-
 type cfUID UID
 
 func (cfUID) typeName() string {
 	return "UID"
-}
-
-func (u cfUID) hash() any {
-	return u
 }
 
 func (u cfUID) toDict() *cfDict {
@@ -160,19 +118,8 @@ func (cfData) typeName() string {
 	return "data"
 }
 
-// dataKey views the bytes as a string, so data are uniqued by their contents without being copied.
-type dataKey string
-
-func (d cfData) hash() any {
-	return dataKey(zeroCopy8BitString(d, 0, len(d)))
-}
-
 type cfDate time.Time
 
 func (cfDate) typeName() string {
 	return "date"
-}
-
-func (d cfDate) hash() any {
-	return time.Time(d)
 }

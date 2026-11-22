@@ -58,7 +58,7 @@ func (d *Decoder) Decode(v any) (err error) {
 	var root cfValue
 	switch first {
 	case BinaryFormat:
-		root, err = newBplistParser(d.reader).parseDocument()
+		root, err = newBinaryParser(d.reader).parseDocument()
 		if err != nil {
 			// Had a bplist header, but still got an error: we have to die here.
 			return err
@@ -103,20 +103,17 @@ func (d *Decoder) parseTextDocument() (cfValue, error) {
 	return root, nil
 }
 
-var (
-	bplistMagic = []byte("bplist")
-	utf8BOM     = []byte{0xEF, 0xBB, 0xBF}
-)
+var utf8BOM = []byte{0xEF, 0xBB, 0xBF}
 
 // XML is tried only for documents that start with '<': a text plist may hold XML tags inside its strings.
 func firstParser(r io.Reader) (int, error) {
 	br := bufio.NewReaderSize(r, 512)
 
-	magic, err := br.Peek(len(bplistMagic))
+	magic, err := br.Peek(len(binaryMagic))
 	if err != nil && !errors.Is(err, io.EOF) {
 		return InvalidFormat, err
 	}
-	if bytes.Equal(magic, bplistMagic) {
+	if bytes.Equal(magic, binaryMagic) {
 		return BinaryFormat, nil
 	}
 

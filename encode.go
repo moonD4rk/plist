@@ -52,7 +52,7 @@ func (e *Encoder) Encode(v any) (err error) {
 	case XMLFormat:
 		g = newXMLPlistGenerator(e.writer)
 	case BinaryFormat, AutomaticFormat:
-		g = newBplistGenerator(e.writer)
+		g = newBinaryWriter(e.writer)
 	case OpenStepFormat, GNUStepFormat:
 		g = newTextPlistGenerator(e.writer, e.format)
 	default:

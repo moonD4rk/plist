@@ -15,7 +15,7 @@ func TestBplistInt128(t *testing.T) {
 	bplist := []byte{0x62, 0x70, 0x6c, 0x69, 0x73, 0x74, 0x30, 0x30, 0x14, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x19}
 	expected := uint64(0x090a0b0c0d0e0f10)
 	buf := bytes.NewReader(bplist)
-	d := newBplistParser(buf)
+	d := newBinaryParser(buf)
 	pval, _ := d.parseDocument()
 	if pinteger, ok := pval.(*cfInteger); !ok || pinteger.value != expected {
 		t.Error("Expected", expected, "received", pval)
@@ -79,7 +79,7 @@ func TestBplistSignedIntValues(t *testing.T) {
 	}
 
 	buf := bytes.NewReader(bplist)
-	d := newBplistParser(buf)
+	d := newBinaryParser(buf)
 	pval, _ := d.parseDocument()
 	parsedValues := pval.(*cfArray).values
 	for i, cfv := range parsedValues {
@@ -154,7 +154,7 @@ func TestBplistNonPowerOfTwoOffsetIntSizes(t *testing.T) {
 	}
 
 	buf := bytes.NewReader(bplist)
-	d := newBplistParser(buf)
+	d := newBinaryParser(buf)
 	_, err := d.parseDocument()
 	if err != nil {
 		t.Error("Unexpected error", err)

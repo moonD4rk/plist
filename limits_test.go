@@ -142,18 +142,18 @@ func bplistCount(tag byte, n int) []byte {
 	if n < 0xF {
 		return []byte{tag | byte(n)}
 	}
-	return []byte{tag | 0xF, bpTagInteger | 0x2, byte(n >> 24), byte(n >> 16), byte(n >> 8), byte(n)}
+	return []byte{tag | 0xF, markerInt | 0x2, byte(n >> 24), byte(n >> 16), byte(n >> 8), byte(n)}
 }
 
 func bplistArray(refs ...int) []byte {
-	b := bplistCount(bpTagArray, len(refs))
+	b := bplistCount(markerArray, len(refs))
 	for _, ref := range refs {
 		b = append(b, byte(ref>>8), byte(ref))
 	}
 	return b
 }
 
-var bplistLeaf = []byte{bpTagASCIIString | 1, 'x'}
+var bplistLeaf = []byte{markerASCII | 1, 'x'}
 
 func repeatRef(ref, n int) []int {
 	refs := make([]int, n)
@@ -259,9 +259,9 @@ func TestBplistValueBudget(t *testing.T) {
 	}{
 		{"two references per level", doublingBplist(21), errTooManyValues},
 		{"object IDs sharing one encoding", overlappingBplist(2000), errTooManyValues},
-		{"object IDs sharing one data object", aliasedBplist(bpTagData, 4096, 1, 2000), errTooManyValues},
-		{"object IDs sharing one ASCII string", aliasedBplist(bpTagASCIIString, 4096, 1, 2000), errTooManyValues},
-		{"object IDs sharing one UTF-16 string", aliasedBplist(bpTagUTF16String, 2048, 2, 2000), errTooManyValues},
+		{"object IDs sharing one data object", aliasedBplist(markerData, 4096, 1, 2000), errTooManyValues},
+		{"object IDs sharing one ASCII string", aliasedBplist(markerASCII, 4096, 1, 2000), errTooManyValues},
+		{"object IDs sharing one UTF-16 string", aliasedBplist(markerUTF16, 2048, 2, 2000), errTooManyValues},
 		{"shared array over the budget", sharedArrayBplist(6000, 100), errTooManyValues},
 		{"depth reached through parsed objects", stagedChainBplist(), errMaxDepthExceeded},
 	}
