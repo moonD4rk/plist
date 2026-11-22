@@ -2,6 +2,7 @@ package plist
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"testing"
 )
@@ -45,5 +46,48 @@ func TestVariousIllegalXMLPlists(t *testing.T) {
 				t.Logf("Error: %v", err)
 			}
 		})
+	}
+}
+
+type failingWriter struct{ err error }
+
+func (w failingWriter) Write([]byte) (int, error) { return 0, w.err }
+
+func TestXMLEncoderReturnsWriteError(t *testing.T) {
+	want := errors.New("disk full")
+	if err := NewEncoder(failingWriter{want}).Encode("short document"); !errors.Is(err, want) {
+		t.Errorf("Encode error = %v, want %v", err, want)
+	}
+}
+
+func TestXMLEmptyData(t *testing.T) {
+	type record struct {
+		Empty []byte
+		Nil   []byte
+	}
+	data, err := Marshal(record{Empty: []byte{}}, XMLFormat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := xmlPreamble + `<plist version="1.0"><dict><key>Empty</key><data></data><key>Nil</key><data></data></dict></plist>`
+	if string(data) != want {
+		t.Errorf("encoded %s\nwant    %s", data, want)
+	}
+
+	indented, err := MarshalIndent([][]byte{{}}, XMLFormat, "\t")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want = xmlPreamble + "<plist version=\"1.0\">\n\t<array>\n\t\t<data></data>\n\t</array>\n</plist>"
+	if string(indented) != want {
+		t.Errorf("encoded %s\nwant    %s", indented, want)
+	}
+
+	var back record
+	if _, err := Unmarshal(data, &back); err != nil {
+		t.Fatal(err)
+	}
+	if back.Empty == nil || len(back.Empty) != 0 || len(back.Nil) != 0 {
+		t.Errorf("decoded %#v, want two empty values", back)
 	}
 }

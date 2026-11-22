@@ -16,3 +16,15 @@ const maxParseDepth = 128
 // errMaxDepthExceeded is returned (via panic, matching the package's existing
 // error-handling convention) when nesting exceeds maxParseDepth.
 var errMaxDepthExceeded = errors.New("plist: maximum nesting depth exceeded")
+
+const minValueBudget = 1 << 19
+
+var errTooManyValues = errors.New("plist: document expands to too many values")
+
+// A binary plist that shares no containers holds at most one value per byte, so it never reaches the budget.
+func valueBudget(size int) uint64 {
+	if size > minValueBudget {
+		return uint64(size)
+	}
+	return minValueBudget
+}

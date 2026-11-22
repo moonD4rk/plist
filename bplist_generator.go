@@ -32,7 +32,7 @@ func bplistValueShouldUnique(pval cfValue) bool {
 
 type bplistGenerator struct {
 	writer   *countedWriter
-	objmap   map[any]uint64 // maps pValue.hash()es to object locations
+	objmap   map[any]uint64 // maps cfValue.hash() to the index of the value in objtable
 	objtable []cfValue
 	trailer  bplistTrailer
 }
@@ -59,7 +59,9 @@ func (p *bplistGenerator) flattenPlistValue(pval cfValue) {
 		}
 	case *cfArray:
 		for _, v := range pval.values {
-			p.flattenPlistValue(v)
+			if v != nil {
+				p.flattenPlistValue(v)
+			}
 		}
 	}
 }
@@ -125,7 +127,7 @@ func (p *bplistGenerator) writePlistValue(pval cfValue) {
 	case cfUID:
 		p.writeUIDTag(UID(pval))
 	default:
-		panic(fmt.Errorf("unknown plist type %t", pval))
+		panic(fmt.Errorf("unknown plist type %T", pval))
 	}
 }
 
@@ -211,7 +213,11 @@ func (p *bplistGenerator) writeRealTag(n float64, bits int) {
 
 func (p *bplistGenerator) writeDateTag(t time.Time) {
 	tag := uint8(bpTagDate) | 0x3
-	val := float64(t.In(time.UTC).UnixNano()) / float64(time.Second)
+	val := float64(t.Unix()) + float64(t.Nanosecond())/float64(time.Second)
+	// UnixNano overflows outside the years 1678 to 2262; inside them it keeps the output of earlier releases.
+	if nano := t.UnixNano(); time.Unix(0, nano).Equal(t) {
+		val = float64(nano) / float64(time.Second)
+	}
 	val -= 978307200 // Adjust to Apple Epoch
 
 	binary.Write(p.writer, binary.BigEndian, tag)
@@ -281,8 +287,18 @@ func (p *bplistGenerator) writeDictionaryTag(dict *cfDictionary) {
 }
 
 func (p *bplistGenerator) writeArrayTag(arr []cfValue) {
-	p.writeCountedTag(bpTagArray, uint64(len(arr)))
+	count := 0
 	for _, v := range arr {
+		if v != nil {
+			count++
+		}
+	}
+
+	p.writeCountedTag(bpTagArray, uint64(count))
+	for _, v := range arr {
+		if v == nil {
+			continue
+		}
 		objIdx, ok := p.indexForPlistValue(v)
 		if !ok {
 			panic(errors.New("failed to find value in object map during serialization"))

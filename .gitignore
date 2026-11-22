@@ -1,6 +1,4 @@
 # Ignore everything by default (whitelist approach).
-# This is critical for a security research tool — prevents
-# accidental commit of browser data files (Cookies, Login Data, etc.)
 *
 
 # Allow git to traverse directories

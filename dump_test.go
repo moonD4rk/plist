@@ -113,9 +113,9 @@ func TestDump(t *testing.T) {
 		os.WriteFile(filepath.Join(invalidDir, saneName+ext), []byte(td.Data), 0o666)
 	}
 
-	// Dump invalid XML plists (We don't have any right now.)
+	// Dump invalid XML plists
 	for i, v := range InvalidXMLPlists {
-		os.WriteFile(filepath.Join(invalidDir, fmt.Sprintf("invalid-x-%2.02d", i)+extensions[XMLFormat]), []byte(v), 0o666)
+		os.WriteFile(filepath.Join(invalidDir, fmt.Sprintf("invalid-x-%2.02d", i)+extensions[XMLFormat]), []byte(v.Data), 0o666)
 	}
 
 	// Dump invalid binary plists

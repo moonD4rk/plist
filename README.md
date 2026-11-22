@@ -17,7 +17,7 @@ go get github.com/moond4rk/plist
 
 ## Features
 
-- Encode and decode property lists from/to arbitrary Go types
+- Encode and decode property lists from/to Go structs, maps, slices and basic types
 - Supports all four formats: **XML**, **Binary**, **OpenStep**, and **GNUStep**
 - Automatic format detection on decode
 - Struct tags (`plist:"name,omitempty"`) for field customization
@@ -116,10 +116,17 @@ err := encoder.Encode(value)
 ```go
 type Example struct {
     Name    string `plist:"display_name"`         // custom key name
-    Count   int    `plist:"count,omitempty"`       // omit if zero value
+    Count   int    `plist:"count,omitempty"`       // omit if empty: false, 0, nil or zero length
     Ignored string `plist:"-"`                     // skip this field
 }
 ```
+
+## Decoding limits
+
+`Unmarshal` and `Decoder.Decode` return an error for a document that asks for an unreasonable amount of work:
+
+- Containers nested deeper than about 128 levels.
+- A binary property list that holds more object references, or expands to more values once every reference to a shared object is followed, than the larger of its size in bytes and 524,288. A binary property list that shares no containers never reaches this limit.
 
 ## Changes from upstream
 

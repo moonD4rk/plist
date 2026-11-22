@@ -1,6 +1,7 @@
 package plist
 
 import (
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -134,5 +135,199 @@ func TestBplistShallowStillParses(t *testing.T) {
 	var out any
 	if _, err := Unmarshal(data, &out); err != nil {
 		t.Fatalf("valid shallow bplist failed to decode: %v", err)
+	}
+}
+
+func bplistCount(tag byte, n int) []byte {
+	if n < 0xF {
+		return []byte{tag | byte(n)}
+	}
+	return []byte{tag | 0xF, bpTagInteger | 0x2, byte(n >> 24), byte(n >> 16), byte(n >> 8), byte(n)}
+}
+
+func bplistArray(refs ...int) []byte {
+	b := bplistCount(bpTagArray, len(refs))
+	for _, ref := range refs {
+		b = append(b, byte(ref>>8), byte(ref))
+	}
+	return b
+}
+
+var bplistLeaf = []byte{bpTagASCIIString | 1, 'x'}
+
+func repeatRef(ref, n int) []int {
+	refs := make([]int, n)
+	for i := range refs {
+		refs[i] = ref
+	}
+	return refs
+}
+
+// ids[i] is the index in objects that object ID i points to, so several IDs can share one encoding; ID 0 is the root.
+func assembleBplist(objects [][]byte, ids []int) []byte {
+	doc := []byte("bplist00")
+	offsets := make([]int, len(objects))
+	for i, object := range objects {
+		offsets[i] = len(doc)
+		doc = append(doc, object...)
+	}
+
+	tableOffset := len(doc)
+	for _, id := range ids {
+		off := offsets[id]
+		doc = append(doc, byte(off>>24), byte(off>>16), byte(off>>8), byte(off))
+	}
+
+	trailer := make([]byte, 32)
+	trailer[6] = 4
+	trailer[7] = 2
+	putUint64BE(trailer[8:16], uint64(len(ids)))
+	putUint64BE(trailer[24:32], uint64(tableOffset))
+	return append(doc, trailer...)
+}
+
+func sequentialIDs(n int) []int {
+	ids := make([]int, n)
+	for i := range ids {
+		ids[i] = i
+	}
+	return ids
+}
+
+// doublingBplist nests levels arrays, each holding two references to the next one.
+func doublingBplist(levels int) []byte {
+	objects := make([][]byte, 0, levels+1)
+	for i := 1; i <= levels; i++ {
+		objects = append(objects, bplistArray(i, i))
+	}
+	objects = append(objects, bplistLeaf)
+	return assembleBplist(objects, sequentialIDs(len(objects)))
+}
+
+// stagedChainBplist nests 300 arrays but lists the deepest third first, so no single descent passes 101 levels.
+func stagedChainBplist() []byte {
+	const links = 300
+	objects := [][]byte{bplistArray(1+200, 1+100, 1)}
+	for i := 0; i < links; i++ {
+		objects = append(objects, bplistArray(i+2))
+	}
+	objects = append(objects, bplistLeaf)
+	return assembleBplist(objects, sequentialIDs(len(objects)))
+}
+
+// overlappingBplist points count object IDs at the bytes of one array of count references.
+func overlappingBplist(count int) []byte {
+	leaf := count + 1
+	objects := [][]byte{nil, bplistArray(repeatRef(leaf, count)...), bplistLeaf}
+	ids := []int{0}
+	refs := make([]int, count)
+	for i := range refs {
+		refs[i] = i + 1
+		ids = append(ids, 1)
+	}
+	objects[0] = bplistArray(refs...)
+	return assembleBplist(objects, append(ids, 2))
+}
+
+// sharedArrayBplist refers to one array of size strings from a root array, references times.
+func sharedArrayBplist(references, size int) []byte {
+	objects := [][]byte{
+		bplistArray(repeatRef(1, references)...),
+		bplistArray(repeatRef(2, size)...),
+		bplistLeaf,
+	}
+	return assembleBplist(objects, sequentialIDs(len(objects)))
+}
+
+func TestBplistValueBudget(t *testing.T) {
+	tests := []struct {
+		name string
+		data []byte
+		want error
+	}{
+		{"two references per level", doublingBplist(21), errTooManyValues},
+		{"object IDs sharing one encoding", overlappingBplist(2000), errTooManyValues},
+		{"shared array over the budget", sharedArrayBplist(6000, 100), errTooManyValues},
+		{"depth reached through parsed objects", stagedChainBplist(), errMaxDepthExceeded},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var out any
+			_, err := Unmarshal(tc.data, &out)
+			if err == nil {
+				t.Fatalf("Unmarshal of %d bytes succeeded, want %q", len(tc.data), tc.want)
+			}
+			if !strings.Contains(err.Error(), tc.want.Error()) {
+				t.Fatalf("Unmarshal error = %q, want %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestBplistSharedContainersWithinBudget(t *testing.T) {
+	const references, size = 5000, 100
+
+	var out [][]string
+	if _, err := Unmarshal(sharedArrayBplist(references, size), &out); err != nil {
+		t.Fatal(err)
+	}
+	if len(out) != references || len(out[references-1]) != size {
+		t.Fatalf("decoded %d arrays, the last of %d strings; want %d arrays of %d", len(out), len(out[len(out)-1]), references, size)
+	}
+}
+
+func TestBplistValueBudgetGrowsWithDocument(t *testing.T) {
+	const elements = minValueBudget + 1000
+
+	data, err := Marshal(make([]int, elements), BinaryFormat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out []int
+	if _, err := Unmarshal(data, &out); err != nil {
+		t.Fatal(err)
+	}
+	if len(out) != elements {
+		t.Fatalf("decoded %d elements, want %d", len(out), elements)
+	}
+}
+
+func allocatedBytes(f func()) uint64 {
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	f()
+	runtime.ReadMemStats(&after)
+	return after.TotalAlloc - before.TotalAlloc
+}
+
+func TestDecodeMemoryIsProportionalToInput(t *testing.T) {
+	const repeat = 20000
+	const limit = 96 // allocated bytes per input byte
+
+	tests := []struct {
+		name     string
+		document string
+	}{
+		{"text dictionaries", "(" + strings.Repeat("{},", repeat) + ")"},
+		{"text arrays", "(" + strings.Repeat("(),", repeat) + ")"},
+		{"text data", "(" + strings.Repeat("<>,", repeat) + ")"},
+		{"text escapes", `"` + strings.Repeat(`a\n`, 5*repeat) + `"`},
+		{"XML dictionaries", "<plist><array>" + strings.Repeat("<dict/>", repeat) + "</array></plist>"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			data := []byte(tc.document)
+			var out any
+			var err error
+			allocated := allocatedBytes(func() { _, err = Unmarshal(data, &out) })
+			if err != nil {
+				t.Fatal(err)
+			}
+			perByte := allocated / uint64(len(data))
+			t.Logf("%d bytes allocated for %d bytes of input (%d per byte)", allocated, len(data), perByte)
+			if perByte > limit {
+				t.Errorf("allocated %d bytes per input byte, want at most %d", perByte, limit)
+			}
+		})
 	}
 }

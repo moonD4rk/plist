@@ -12,10 +12,19 @@ var (
 	timeType           = reflect.TypeOf((*time.Time)(nil)).Elem()
 )
 
+// A method declared on the element type cannot be called through a nil pointer.
+func isNilValueReceiver(itf any, interfaceType reflect.Type) bool {
+	val := reflect.ValueOf(itf)
+	return val.Kind() == reflect.Ptr && val.IsNil() && val.Type().Elem().Implements(interfaceType)
+}
+
 func implementsInterface(val reflect.Value, interfaceType reflect.Type) (any, bool) {
 	if val.CanInterface() {
 		itf := val.Interface()
 		if itf != nil && reflect.TypeOf(itf).Implements(interfaceType) {
+			if isNilValueReceiver(itf, interfaceType) {
+				return nil, false
+			}
 			return itf, true
 		}
 	}
@@ -61,8 +70,12 @@ func (p *Encoder) marshalStruct(typ reflect.Type, val reflect.Value) cfValue {
 		if !value.IsValid() {
 			continue
 		}
+		pval := p.marshal(value)
+		if pval == nil {
+			continue
+		}
 		dict.keys = append(dict.keys, finfo.name)
-		dict.values = append(dict.values, p.marshal(value))
+		dict.values = append(dict.values, pval)
 	}
 
 	return dict
@@ -145,8 +158,10 @@ func (p *Encoder) marshal(val reflect.Value) cfValue {
 				// arrays may be addressable but do not support .Bytes
 				b = val.Bytes()
 			} else {
-				b = make([]byte, val.Len())
-				reflect.Copy(reflect.ValueOf(b), val)
+				// reflect.Copy needs identical element types, and the element may be a named byte type.
+				dst := reflect.MakeSlice(reflect.SliceOf(typ.Elem()), val.Len(), val.Len())
+				reflect.Copy(dst, val)
+				b = dst.Bytes()
 			}
 			return cfData(b)
 		}
