@@ -441,9 +441,19 @@ func (d *Decoder) unmarshalArray(a *cfArray, dst reflect.Value) {
 	var n int
 	switch dst.Kind() {
 	case reflect.Slice:
+		// reflect.Value.Grow would not do: it carries the elements between len and cap over to the new array.
 		n = dst.Len()
-		settable(dst).Grow(len(a.values))
-		dst.SetLen(n + len(a.values))
+		total := n + len(a.values)
+		if total > settable(dst).Cap() {
+			capacity := dst.Cap()
+			for capacity < total {
+				capacity = growSliceCap(capacity)
+			}
+			grown := reflect.MakeSlice(dst.Type(), n, capacity)
+			reflect.Copy(grown, dst)
+			dst.Set(grown)
+		}
+		dst.SetLen(total)
 	case reflect.Array:
 		if len(a.values) > dst.Cap() {
 			panic(fmt.Errorf("plist: attempted to unmarshal %d values into an array of size %d", len(a.values), dst.Cap()))
@@ -456,6 +466,17 @@ func (d *Decoder) unmarshalArray(a *cfArray, dst reflect.Value) {
 	for _, sval := range a.values {
 		d.unmarshal(sval, dst.Index(n))
 		n++
+	}
+}
+
+func growSliceCap(c int) int {
+	switch {
+	case c == 0:
+		return 4
+	case c < 1024:
+		return c * 2 // Double for small slices
+	default:
+		return c + c/4 // Increase by 25% for large slices
 	}
 }
 
