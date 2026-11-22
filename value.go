@@ -16,40 +16,40 @@ type cfValue interface {
 	hash() any
 }
 
-type cfDictionary struct {
+type cfDict struct {
 	keys   sort.StringSlice
 	values []cfValue
 }
 
-func (*cfDictionary) typeName() string {
+func (*cfDict) typeName() string {
 	return "dictionary"
 }
 
-func (p *cfDictionary) hash() any {
+func (p *cfDict) hash() any {
 	return p
 }
 
-func (p *cfDictionary) Len() int {
+func (p *cfDict) Len() int {
 	return len(p.keys)
 }
 
-func (p *cfDictionary) Less(i, j int) bool {
+func (p *cfDict) Less(i, j int) bool {
 	return p.keys.Less(i, j)
 }
 
-func (p *cfDictionary) Swap(i, j int) {
+func (p *cfDict) Swap(i, j int) {
 	p.keys.Swap(i, j)
 	p.values[i], p.values[j] = p.values[j], p.values[i]
 }
 
-func (p *cfDictionary) sort() {
+func (p *cfDict) sort() {
 	sort.Sort(p)
 }
 
-func (p *cfDictionary) maybeUID(lax bool) cfValue {
+func (p *cfDict) maybeUID(lax bool) cfValue {
 	if len(p.keys) == 1 && p.keys[0] == "CF$UID" && len(p.values) == 1 {
 		pval := p.values[0]
-		if integer, ok := pval.(*cfNumber); ok {
+		if integer, ok := pval.(*cfInteger); ok {
 			return cfUID(integer.value)
 		}
 		// Openstep only has cfString. Act like the unmarshaller a bit.
@@ -86,16 +86,16 @@ func (p cfString) hash() any {
 	return string(p)
 }
 
-type cfNumber struct {
+type cfInteger struct {
 	signed bool
 	value  uint64
 }
 
-func (*cfNumber) typeName() string {
+func (*cfInteger) typeName() string {
 	return "integer"
 }
 
-func (p *cfNumber) hash() any {
+func (p *cfInteger) hash() any {
 	if p.signed {
 		return int64(p.value)
 	}
@@ -103,7 +103,7 @@ func (p *cfNumber) hash() any {
 }
 
 type cfReal struct {
-	wide  bool
+	is32  bool
 	value float64
 }
 
@@ -114,23 +114,23 @@ func (cfReal) typeName() string {
 // realKey compares bit patterns: as a map key NaN never equals itself and -0 equals +0.
 type realKey struct {
 	bits uint64
-	wide bool
+	is32 bool
 }
 
 func (p *cfReal) hash() any {
-	if p.wide {
-		return realKey{bits: math.Float64bits(p.value), wide: true}
+	if p.is32 {
+		return realKey{bits: uint64(math.Float32bits(float32(p.value))), is32: true}
 	}
-	return realKey{bits: uint64(math.Float32bits(float32(p.value)))}
+	return realKey{bits: math.Float64bits(p.value)}
 }
 
-type cfBoolean bool
+type cfBool bool
 
-func (cfBoolean) typeName() string {
+func (cfBool) typeName() string {
 	return "boolean"
 }
 
-func (p cfBoolean) hash() any {
+func (p cfBool) hash() any {
 	return bool(p)
 }
 
@@ -144,10 +144,10 @@ func (p cfUID) hash() any {
 	return p
 }
 
-func (p cfUID) toDict() *cfDictionary {
-	return &cfDictionary{
+func (p cfUID) toDict() *cfDict {
+	return &cfDict{
 		keys: []string{cfUIDMagic},
-		values: []cfValue{&cfNumber{
+		values: []cfValue{&cfInteger{
 			signed: false,
 			value:  uint64(p),
 		}},

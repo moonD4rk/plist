@@ -14,7 +14,7 @@ func TestLaxDecode(t *testing.T) {
 	d := LaxTestData{}
 	buf := bytes.NewReader([]byte(laxTestDataStringsOnly))
 	decoder := NewDecoder(buf)
-	decoder.lax = true
+	decoder.coerceStrings = true
 	err := decoder.Decode(&d)
 	if err != nil {
 		t.Error(err.Error())
@@ -46,7 +46,7 @@ func TestIllegalLaxDecode(t *testing.T) {
 	for _, plist := range plists {
 		buf := bytes.NewReader([]byte(plist.pl))
 		decoder := NewDecoder(buf)
-		decoder.lax = true
+		decoder.coerceStrings = true
 		err := decoder.Decode(plist.d)
 		t.Logf("Error: %v", err)
 		if err == nil {

@@ -25,17 +25,17 @@ func isEmptyValue(v reflect.Value) bool {
 	}
 }
 
-// typeInfo holds details for the plist representation of a type.
-type typeInfo struct {
-	fields []fieldInfo
+// structFields holds details for the plist representation of a type.
+type structFields struct {
+	fields []field
 }
 
-// fieldInfo holds details for the plist representation of a single field.
-type fieldInfo struct {
+// field holds details for the plist representation of a single field.
+type field struct {
 	idx  []int
 	name string
 
-	// omitEmptyDepthMap stores, for each entry in idx, whether at that level the user had specified
+	// omitEmptyMask stores, for each entry in idx, whether at that level the user had specified
 	// omitempty. This matters for anonymous embedded structs, where the index path to a given field
 	// may traverse different struct types
 	//
@@ -47,29 +47,29 @@ type fieldInfo struct {
 	//
 	// As an optimization, we store it as a bit field. This means anonymous embedded structs more than 64 entries
 	// may forget their omitempty states.
-	omitEmptyDepthMap uint64
+	omitEmptyMask uint64
 }
 
 var (
-	tinfoMap  = make(map[reflect.Type]*typeInfo)
-	tinfoLock sync.RWMutex
+	fieldCache     = make(map[reflect.Type]*structFields)
+	fieldCacheLock sync.RWMutex
 )
 
-// getTypeInfo returns the typeInfo structure with details necessary
+// cachedFields returns the typeInfo structure with details necessary
 // for marshaling and unmarshaling typ.
-func getTypeInfo(typ reflect.Type) (*typeInfo, error) {
-	return typeInfoWithin(typ, nil)
+func cachedFields(typ reflect.Type) (*structFields, error) {
+	return fieldsWithin(typ, nil)
 }
 
-// typeInfoWithin stops at a type in embedding: its fields are already promoted from a shallower level.
-func typeInfoWithin(typ reflect.Type, embedding []reflect.Type) (*typeInfo, error) {
-	tinfoLock.RLock()
-	tinfo, ok := tinfoMap[typ]
-	tinfoLock.RUnlock()
+// fieldsWithin stops at a type in embedding: its fields are already promoted from a shallower level.
+func fieldsWithin(typ reflect.Type, embedding []reflect.Type) (*structFields, error) {
+	fieldCacheLock.RLock()
+	tinfo, ok := fieldCache[typ]
+	fieldCacheLock.RUnlock()
 	if ok {
 		return tinfo, nil
 	}
-	tinfo = &typeInfo{}
+	tinfo = &structFields{}
 	if typ.Kind() == reflect.Struct {
 		embedding = append(embedding, typ)
 		n := typ.NumField()
@@ -79,7 +79,7 @@ func typeInfoWithin(typ reflect.Type, embedding []reflect.Type) (*typeInfo, erro
 				continue // unexported, or excluded with plist:"-"
 			}
 
-			finfo, err := structFieldInfo(typ, &f)
+			finfo, err := newField(typ, &f)
 			if err != nil {
 				return nil, err
 			}
@@ -99,32 +99,32 @@ func typeInfoWithin(typ reflect.Type, embedding []reflect.Type) (*typeInfo, erro
 			}
 
 			// Add the field if it doesn't conflict with other fields.
-			if err := addFieldInfo(typ, tinfo, finfo); err != nil {
+			if err := addField(typ, tinfo, finfo); err != nil {
 				return nil, err
 			}
 		}
 	}
 	// A nested result may lack fields cut off by an outer type in embedding, so only top-level results are cached.
 	if len(embedding) <= 1 {
-		tinfoLock.Lock()
-		tinfoMap[typ] = tinfo
-		tinfoLock.Unlock()
+		fieldCacheLock.Lock()
+		fieldCache[typ] = tinfo
+		fieldCacheLock.Unlock()
 	}
 	return tinfo, nil
 }
 
-func addEmbeddedFields(typ reflect.Type, tinfo *typeInfo, field *fieldInfo, embedded reflect.Type, embedding []reflect.Type) error {
+func addEmbeddedFields(typ reflect.Type, tinfo *structFields, outer *field, embedded reflect.Type, embedding []reflect.Type) error {
 	if containsType(embedding, embedded) {
 		return nil
 	}
-	inner, err := typeInfoWithin(embedded, embedding)
+	inner, err := fieldsWithin(embedded, embedding)
 	if err != nil {
 		return err
 	}
 	for _, innerFinfo := range inner.fields {
-		innerFinfo.idx = append(field.idx, innerFinfo.idx...)
-		innerFinfo.omitEmptyDepthMap = field.omitEmptyDepthMap | (innerFinfo.omitEmptyDepthMap << uint(len(field.idx)))
-		if err := addFieldInfo(typ, tinfo, &innerFinfo); err != nil {
+		innerFinfo.idx = append(outer.idx, innerFinfo.idx...)
+		innerFinfo.omitEmptyMask = outer.omitEmptyMask | (innerFinfo.omitEmptyMask << uint(len(outer.idx)))
+		if err := addField(typ, tinfo, &innerFinfo); err != nil {
 			return err
 		}
 	}
@@ -140,9 +140,9 @@ func containsType(types []reflect.Type, typ reflect.Type) bool {
 	return false
 }
 
-// structFieldInfo builds and returns a fieldInfo for f.
-func structFieldInfo(typ reflect.Type, f *reflect.StructField) (*fieldInfo, error) {
-	finfo := &fieldInfo{idx: f.Index}
+// newField builds and returns a fieldInfo for f.
+func newField(typ reflect.Type, f *reflect.StructField) (*field, error) {
+	finfo := &field{idx: f.Index}
 
 	tag := f.Tag.Get("plist")
 
@@ -154,7 +154,7 @@ func structFieldInfo(typ reflect.Type, f *reflect.StructField) (*fieldInfo, erro
 		for _, flag := range tokens[1:] {
 			switch flag {
 			case "omitempty":
-				finfo.omitEmptyDepthMap = 1 << uint(len(f.Index)-1)
+				finfo.omitEmptyMask = 1 << uint(len(f.Index)-1)
 			}
 		}
 	}
@@ -170,8 +170,8 @@ func structFieldInfo(typ reflect.Type, f *reflect.StructField) (*fieldInfo, erro
 	return finfo, nil
 }
 
-// addFieldInfo adds newf unless a field of the same name is embedded less deeply; it replaces those that are not.
-func addFieldInfo(typ reflect.Type, tinfo *typeInfo, newf *fieldInfo) error {
+// addField adds newf unless a field of the same name is embedded less deeply; it replaces those that are not.
+func addField(typ reflect.Type, tinfo *structFields, newf *field) error {
 	var conflicts []int
 	// First, figure all conflicts. Most working code will have none.
 	for i := range tinfo.fields {
@@ -206,11 +206,11 @@ func addFieldInfo(typ reflect.Type, tinfo *typeInfo, newf *fieldInfo) error {
 	return nil
 }
 
-// valueForWriting returns v's field value corresponding to finfo.
+// fieldForDecode returns v's field value corresponding to finfo.
 // It's equivalent to v.FieldByIndex(finfo.idx), but initializes
 // and dereferences pointers as necessary. It returns the zero Value
 // if it cannot initialize a nil pointer on the way.
-func (finfo *fieldInfo) valueForWriting(v reflect.Value) reflect.Value {
+func (finfo *field) fieldForDecode(v reflect.Value) reflect.Value {
 	for i, x := range finfo.idx {
 		if i > 0 {
 			t := v.Type()
@@ -229,8 +229,8 @@ func (finfo *fieldInfo) valueForWriting(v reflect.Value) reflect.Value {
 	return v
 }
 
-// value is v.FieldByIndex(finfo.idx), or the zero Value past a nil embedded pointer or an empty omitempty level.
-func (finfo *fieldInfo) value(v reflect.Value) reflect.Value {
+// fieldForEncode is v.FieldByIndex(finfo.idx), or the zero Value past a nil embedded pointer or an empty omitempty level.
+func (finfo *field) fieldForEncode(v reflect.Value) reflect.Value {
 	for i, x := range finfo.idx {
 		t := v.Type()
 		if t.Kind() == reflect.Ptr && t.Elem().Kind() == reflect.Struct {
@@ -242,7 +242,7 @@ func (finfo *fieldInfo) value(v reflect.Value) reflect.Value {
 
 		v = v.Field(x)
 
-		if (finfo.omitEmptyDepthMap&(1<<uint(i))) != 0 && isEmptyValue(v) {
+		if (finfo.omitEmptyMask&(1<<uint(i))) != 0 && isEmptyValue(v) {
 			return reflect.Value{}
 		}
 	}

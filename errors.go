@@ -6,11 +6,11 @@ import (
 	"reflect"
 )
 
-type unknownTypeError struct {
+type unsupportedTypeError struct {
 	typ reflect.Type
 }
 
-func (u *unknownTypeError) Error() string {
+func (u *unsupportedTypeError) Error() string {
 	return "plist: can't marshal value of type " + u.typ.String()
 }
 
@@ -27,12 +27,12 @@ func (e invalidPlistError) Error() string {
 	return s
 }
 
-type plistParseError struct {
+type syntaxError struct {
 	format string
 	err    error
 }
 
-func (e plistParseError) Error() string {
+func (e syntaxError) Error() string {
 	s := "plist: error parsing " + e.format + " property list"
 	if e.err != nil {
 		s += ": " + e.err.Error()
@@ -40,22 +40,22 @@ func (e plistParseError) Error() string {
 	return s
 }
 
-type incompatibleDecodeTypeError struct {
+type unmarshalTypeError struct {
 	dest reflect.Type
 	src  string // type name (from cfValue)
 }
 
-func (u *incompatibleDecodeTypeError) Error() string {
+func (u *unmarshalTypeError) Error() string {
 	return fmt.Sprintf("plist: type mismatch: tried to decode plist type `%v' into value of type `%v'", u.src, u.dest)
 }
 
-// invalidDecodeTargetError names the value given to Unmarshal, not the value inside it that could not be set.
-type invalidDecodeTargetError struct {
+// invalidTargetError names the value given to Unmarshal, not the value inside it that could not be set.
+type invalidTargetError struct {
 	typ   reflect.Type // nil for an untyped nil target
 	isNil bool
 }
 
-func (e *invalidDecodeTargetError) Error() string {
+func (e *invalidTargetError) Error() string {
 	switch {
 	case e.typ == nil:
 		return "plist: cannot decode into nil"

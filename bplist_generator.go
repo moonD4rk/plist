@@ -24,7 +24,7 @@ func bplistMinimumIntSize(n uint64) int {
 
 func bplistValueShouldUnique(pval cfValue) bool {
 	switch pval.(type) {
-	case cfString, *cfNumber, *cfReal, cfDate, cfData:
+	case cfString, *cfInteger, *cfReal, cfDate, cfData:
 		return true
 	}
 	return false
@@ -49,7 +49,7 @@ func (p *bplistGenerator) flattenPlistValue(pval cfValue) {
 	p.objtable = append(p.objtable, pval)
 
 	switch pval := pval.(type) {
-	case *cfDictionary:
+	case *cfDict:
 		pval.sort()
 		for _, k := range pval.keys {
 			p.flattenPlistValue(cfString(k))
@@ -104,21 +104,21 @@ func (p *bplistGenerator) writePlistValue(pval cfValue) {
 	}
 
 	switch pval := pval.(type) {
-	case *cfDictionary:
+	case *cfDict:
 		p.writeDictionaryTag(pval)
 	case *cfArray:
 		p.writeArrayTag(pval.values)
 	case cfString:
 		p.writeStringTag(string(pval))
-	case *cfNumber:
+	case *cfInteger:
 		p.writeIntTag(pval.signed, pval.value)
 	case *cfReal:
-		if pval.wide {
-			p.writeRealTag(pval.value, 64)
-		} else {
+		if pval.is32 {
 			p.writeRealTag(pval.value, 32)
+		} else {
+			p.writeRealTag(pval.value, 64)
 		}
-	case cfBoolean:
+	case cfBool:
 		p.writeBoolTag(bool(pval))
 	case cfData:
 		p.writeDataTag([]byte(pval))
@@ -258,7 +258,7 @@ func (p *bplistGenerator) writeStringTag(str string) {
 	binary.Write(p.writer, binary.BigEndian, []byte(str))
 }
 
-func (p *bplistGenerator) writeDictionaryTag(dict *cfDictionary) {
+func (p *bplistGenerator) writeDictionaryTag(dict *cfDict) {
 	// assumption: sorted already; flattenPlistValue did this.
 	cnt := len(dict.keys)
 	p.writeCountedTag(bpTagDictionary, uint64(cnt))

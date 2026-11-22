@@ -26,7 +26,7 @@ func TestCustomDateUnmarshal(t *testing.T) {
 
 func TestInvalidMapKeyTypeUnmarshal(t *testing.T) {
 	m := make(map[int]string)
-	dict := &cfDictionary{
+	dict := &cfDict{
 		keys: []string{"1", "2"},
 		values: []cfValue{
 			cfString("first"),
@@ -44,7 +44,7 @@ func TestInvalidMapKeyTypeUnmarshal(t *testing.T) {
 		}()
 
 		d := &Decoder{}
-		d.unmarshalDictionary(dict, reflect.ValueOf(m))
+		d.unmarshalDict(dict, reflect.ValueOf(m))
 	}
 
 	if !caught {
@@ -55,7 +55,7 @@ func TestInvalidMapKeyTypeUnmarshal(t *testing.T) {
 func TestValidButAliasedMapKeyTypeUnmarshal(t *testing.T) {
 	type sortaString string
 	m := make(map[sortaString]string)
-	dict := &cfDictionary{
+	dict := &cfDict{
 		keys: []string{"1", "2"},
 		values: []cfValue{
 			cfString("first"),
@@ -73,7 +73,7 @@ func TestValidButAliasedMapKeyTypeUnmarshal(t *testing.T) {
 		}()
 
 		d := &Decoder{}
-		d.unmarshalDictionary(dict, reflect.ValueOf(m))
+		d.unmarshalDict(dict, reflect.ValueOf(m))
 	}
 
 	if caught {

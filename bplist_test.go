@@ -17,7 +17,7 @@ func TestBplistInt128(t *testing.T) {
 	buf := bytes.NewReader(bplist)
 	d := newBplistParser(buf)
 	pval, _ := d.parseDocument()
-	if pinteger, ok := pval.(*cfNumber); !ok || pinteger.value != expected {
+	if pinteger, ok := pval.(*cfInteger); !ok || pinteger.value != expected {
 		t.Error("Expected", expected, "received", pval)
 	}
 }
@@ -83,7 +83,7 @@ func TestBplistSignedIntValues(t *testing.T) {
 	pval, _ := d.parseDocument()
 	parsedValues := pval.(*cfArray).values
 	for i, cfv := range parsedValues {
-		value := int64(cfv.(*cfNumber).value)
+		value := int64(cfv.(*cfInteger).value)
 		if value != expectedValues[i] {
 			t.Error("Expected", expectedValues[i], "received", value)
 		}
