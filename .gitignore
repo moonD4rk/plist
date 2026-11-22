@@ -30,6 +30,9 @@
 # === Documentation ===
 !README.md
 
+# === Test data ===
+!testdata/**
+
 # === Always ignore (override !*/) ===
 .git/
 .idea/
