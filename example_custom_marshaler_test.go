@@ -4,7 +4,7 @@ import (
 	"encoding/base64"
 	"fmt"
 
-	"github.com/moond4rk/plist"
+	"github.com/moond4rk/plist/v2"
 )
 
 type Base64String string

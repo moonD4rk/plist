@@ -9,10 +9,12 @@ A modern Go library for encoding and decoding Apple property list files.
 
 This is a modernized fork of [howett.net/plist](https://pkg.go.dev/howett.net/plist), updated for idiomatic Go 1.20+ development. See [Changes from upstream](#changes-from-upstream) for details.
 
+> **This branch is v2, which is in development.** It has no release yet and its API will change before `v2.0.0`. The released line is v1: `go get github.com/moond4rk/plist` installs it, and it is maintained on the [`v1` branch](https://github.com/moonD4rk/plist/tree/v1). The badges for the Go reference and the report card still point at v1.
+
 ## Install
 
 ```
-go get github.com/moond4rk/plist
+go get github.com/moond4rk/plist/v2
 ```
 
 ## Features
