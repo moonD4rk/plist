@@ -1,9 +1,5 @@
 package plist
 
-import (
-	"reflect"
-)
-
 // Property list format constants
 const (
 	// InvalidFormat is the format reported for a document that could not be parsed.
@@ -31,40 +27,6 @@ var FormatNames = map[int]string{
 	BinaryFormat:   "Binary",
 	OpenStepFormat: "OpenStep",
 	GNUStepFormat:  "GNUStep",
-}
-
-type unknownTypeError struct {
-	typ reflect.Type
-}
-
-func (u *unknownTypeError) Error() string {
-	return "plist: can't marshal value of type " + u.typ.String()
-}
-
-type invalidPlistError struct {
-	format string
-	err    error
-}
-
-func (e invalidPlistError) Error() string {
-	s := "plist: invalid " + e.format + " property list"
-	if e.err != nil {
-		s += ": " + e.err.Error()
-	}
-	return s
-}
-
-type plistParseError struct {
-	format string
-	err    error
-}
-
-func (e plistParseError) Error() string {
-	s := "plist: error parsing " + e.format + " property list"
-	if e.err != nil {
-		s += ": " + e.err.Error()
-	}
-	return s
 }
 
 // A UID is an object reference as used by keyed archives (NSKeyedArchiver).

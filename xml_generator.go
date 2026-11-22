@@ -94,7 +94,7 @@ func (p *xmlPlistGenerator) element(n, v string) {
 	}
 }
 
-func (p *xmlPlistGenerator) writeDictionary(dict *cfDictionary) {
+func (p *xmlPlistGenerator) writeDictionary(dict *cfDict) {
 	dict.sort()
 	p.openTag(xmlDictTag)
 	for i, k := range dict.keys {
@@ -120,7 +120,7 @@ func (p *xmlPlistGenerator) writePlistValue(pval cfValue) {
 	switch pval := pval.(type) {
 	case cfString:
 		p.element(xmlStringTag, string(pval))
-	case *cfNumber:
+	case *cfInteger:
 		if pval.signed {
 			p.element(xmlIntegerTag, strconv.FormatInt(int64(pval.value), 10))
 		} else {
@@ -128,7 +128,7 @@ func (p *xmlPlistGenerator) writePlistValue(pval cfValue) {
 		}
 	case *cfReal:
 		p.element(xmlRealTag, formatXMLFloat(pval.value))
-	case cfBoolean:
+	case cfBool:
 		if bool(pval) {
 			p.element(xmlTrueTag, "")
 		} else {
@@ -144,7 +144,7 @@ func (p *xmlPlistGenerator) writePlistValue(pval cfValue) {
 		p.element(xmlDataTag, base64.StdEncoding.EncodeToString([]byte(pval)))
 	case cfDate:
 		p.element(xmlDateTag, time.Time(pval).In(time.UTC).Format(time.RFC3339))
-	case *cfDictionary:
+	case *cfDict:
 		p.writeDictionary(pval)
 	case *cfArray:
 		p.writeArray(pval)

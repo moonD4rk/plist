@@ -76,7 +76,7 @@ func TestMarshalInterfaceFieldPtrTime(t *testing.T) {
 	rval := reflect.ValueOf(x)
 	cf := e.marshal(rval)
 
-	if dict, ok := cf.(*cfDictionary); ok {
+	if dict, ok := cf.(*cfDict); ok {
 		if _, ok := dict.values[0].(cfDate); !ok {
 			t.Error("inner value is not a cfDate")
 		}

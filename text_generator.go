@@ -118,7 +118,7 @@ func (p *textPlistGenerator) writePlistValue(pval cfValue) {
 	}
 
 	switch pval := pval.(type) {
-	case *cfDictionary:
+	case *cfDict:
 		pval.sort()
 		p.writer.Write([]byte(`{`))
 		p.deltaIndent(1)
@@ -145,7 +145,7 @@ func (p *textPlistGenerator) writePlistValue(pval cfValue) {
 		p.writer.Write([]byte(`)`))
 	case cfString:
 		io.WriteString(p.writer, p.plistQuotedString(string(pval)))
-	case *cfNumber:
+	case *cfInteger:
 		if p.format == GNUStepFormat {
 			p.writer.Write([]byte(`<*I`))
 		}
@@ -169,7 +169,7 @@ func (p *textPlistGenerator) writePlistValue(pval cfValue) {
 		default:
 			io.WriteString(p.writer, num)
 		}
-	case cfBoolean:
+	case cfBool:
 		if p.format == GNUStepFormat {
 			if pval {
 				p.writer.Write([]byte(`<*BY>`))

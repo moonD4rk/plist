@@ -83,7 +83,7 @@ func (p *bplistParser) parseDocument() (pval cfValue, parseError error) {
 				panic(r)
 			}
 
-			parseError = plistParseError{"binary", err}
+			parseError = syntaxError{"binary", err}
 		}
 	}()
 
@@ -282,11 +282,11 @@ func (p *bplistParser) parseScalarAtOffset(off offset) cfValue {
 	case bpTagNull:
 		switch tag & 0x0F {
 		case bpTagBoolTrue, bpTagBoolFalse:
-			return cfBoolean(tag == bpTagBoolTrue)
+			return cfBool(tag == bpTagBoolTrue)
 		}
 	case bpTagInteger:
 		lo, hi, _ := p.parseIntegerAtOffset(off)
-		return &cfNumber{
+		return &cfInteger{
 			signed: hi == signedHighBits, // a signed integer is stored as a 128-bit integer with the top 64 bits set
 			value:  lo,
 		}
@@ -296,11 +296,11 @@ func (p *bplistParser) parseScalarAtOffset(off offset) cfValue {
 		case 4:
 			p.checkBufferRange(off+1, 4) // runzero patch
 			bits := binary.BigEndian.Uint32(p.buffer[off+1:])
-			return &cfReal{wide: false, value: float64(math.Float32frombits(bits))}
+			return &cfReal{is32: true, value: float64(math.Float32frombits(bits))}
 		case 8:
 			p.checkBufferRange(off+1, 8) // runzero patch
 			bits := binary.BigEndian.Uint64(p.buffer[off+1:])
-			return &cfReal{wide: true, value: math.Float64frombits(bits)}
+			return &cfReal{value: math.Float64frombits(bits)}
 		}
 		panic(errors.New("illegal float size"))
 	case bpTagDate:
@@ -426,7 +426,7 @@ func (p *bplistParser) parseObjectListAtOffset(off offset, count uint64) ([]cfVa
 	return objects, shape
 }
 
-func (p *bplistParser) parseDictionaryAtOffset(off offset) (*cfDictionary, valueShape) {
+func (p *bplistParser) parseDictionaryAtOffset(off offset) (*cfDict, valueShape) {
 	p.pushNestedObject(off)
 	defer p.popNestedObject()
 
@@ -443,7 +443,7 @@ func (p *bplistParser) parseDictionaryAtOffset(off offset) (*cfDictionary, value
 		}
 	}
 
-	return &cfDictionary{
+	return &cfDict{
 		keys:   keys,
 		values: objects[cnt:],
 	}, shape

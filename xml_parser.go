@@ -35,7 +35,7 @@ func (p *xmlPlistParser) parseDocument() (pval cfValue, parseError error) {
 				parseError = err
 			} else {
 				// Wrap all non-invalid-plist errors.
-				parseError = plistParseError{"XML", err}
+				parseError = syntaxError{"XML", err}
 			}
 		}
 	}()
@@ -111,12 +111,12 @@ func (p *xmlPlistParser) parseXMLElement(element xml.StartElement) cfValue {
 		if s[0] == '-' {
 			s, base := unsignedGetBase(s[1:])
 			n := mustParseInt("-"+s, base, 64)
-			return &cfNumber{signed: true, value: uint64(n)}
+			return &cfInteger{signed: true, value: uint64(n)}
 		}
 
 		s, base := unsignedGetBase(s)
 		n := mustParseUint(s, base, 64)
-		return &cfNumber{signed: false, value: n}
+		return &cfInteger{signed: false, value: n}
 	case "real":
 		p.ntags++
 		err := p.xmlDecoder.DecodeElement(&charData, &element)
@@ -125,13 +125,13 @@ func (p *xmlPlistParser) parseXMLElement(element xml.StartElement) cfValue {
 		}
 
 		n := mustParseFloat(string(charData), 64)
-		return &cfReal{wide: true, value: n}
+		return &cfReal{value: n}
 	case "true", "false":
 		p.ntags++
 		p.xmlDecoder.Skip()
 
 		b := element.Name.Local == "true"
-		return cfBoolean(b)
+		return cfBool(b)
 	case "date":
 		p.ntags++
 		err := p.xmlDecoder.DecodeElement(&charData, &element)
@@ -196,7 +196,7 @@ func (p *xmlPlistParser) parseXMLElement(element xml.StartElement) cfValue {
 			}
 		}
 
-		dict := &cfDictionary{keys: keys, values: values}
+		dict := &cfDict{keys: keys, values: values}
 		return dict.maybeUID(false)
 	case "array":
 		p.ntags++

@@ -77,7 +77,7 @@ func (p *textPlistParser) parseDocument() (pval cfValue, parseError error) {
 			if !ok {
 				panic(r)
 			}
-			parseError = plistParseError{"text", err}
+			parseError = syntaxError{"text", err}
 		}
 	}()
 
@@ -381,7 +381,7 @@ outer:
 		values = append(values, val)
 	}
 
-	dict := &cfDictionary{keys: keys, values: values}
+	dict := &cfDict{keys: keys, values: values}
 	return dict.maybeUID(p.format == OpenStepFormat)
 }
 
@@ -452,20 +452,20 @@ func (p *textPlistParser) parseGNUStepValue() cfValue {
 		}
 		if v[0] == '-' {
 			n := mustParseInt(v, 10, 64)
-			return &cfNumber{signed: true, value: uint64(n)}
+			return &cfInteger{signed: true, value: uint64(n)}
 		}
 
 		n := mustParseUint(v, 10, 64)
-		return &cfNumber{signed: false, value: n}
+		return &cfInteger{signed: false, value: n}
 	case 'R':
 		n := mustParseFloat(v, 64)
-		return &cfReal{wide: true, value: n} // TODO(DH) 32/64
+		return &cfReal{value: n} // TODO(DH) 32/64
 	case 'B':
 		if len(v) == 0 {
 			p.error("truncated GNUStep extended value")
 		}
 		b := v[0] == 'Y'
-		return cfBoolean(b)
+		return cfBool(b)
 	case 'D':
 		t, err := time.Parse(textPlistTimeLayout, v)
 		if err != nil {
@@ -560,7 +560,7 @@ func (p *textPlistParser) parsePlistValue() cfValue {
 
 		switch p.next() {
 		case eof:
-			return &cfDictionary{}
+			return &cfDict{}
 		case '<':
 			switch p.next() {
 			case '*':
