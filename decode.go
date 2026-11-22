@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"errors"
 	"io"
-	"reflect"
 	"runtime"
 )
 
@@ -21,7 +20,6 @@ type Decoder struct {
 
 	reader io.ReadSeeker
 	lax    bool
-	target reflect.Value // the value given to Decode or to an UnmarshalPlist callback
 }
 
 // Decode reads one property list from the stream and stores it in the value pointed to by v,
@@ -202,9 +200,11 @@ func NewDecoder(r io.ReadSeeker) *Decoder {
 // text otherwise, or if the first XML element is not one a property list has.
 //
 // Unmarshal limits the work a document can ask for. Containers nested deeper than about 128 levels are
-// an error. So is a binary property list that holds more object references, or expands to more values
-// once every reference to a shared object is followed, than the larger of its size in bytes and 524288.
-// A binary property list that shares no containers stays within that limit whatever its size.
+// an error. A binary property list has a budget, the larger of its size in bytes and 524288. It is an
+// error if reading its objects takes more object references and bytes of strings and data than the
+// budget, which happens only when objects overlap, or if it expands to more values than the budget
+// once every reference to a shared object is followed. A binary property list that shares no
+// containers stays within the budget whatever its size.
 func Unmarshal(data []byte, v any) (format int, err error) {
 	r := bytes.NewReader(data)
 	dec := NewDecoder(r)

@@ -2,6 +2,7 @@ package plist
 
 import (
 	"reflect"
+	"sync"
 	"testing"
 	"time"
 )
@@ -190,5 +191,39 @@ func TestUnmarshalNamedByteElements(t *testing.T) {
 				t.Errorf("field decoded as %v, want [1 2 3]", field.Colors)
 			}
 		})
+	}
+}
+
+type concurrentCallback struct{ first, second string }
+
+func (c *concurrentCallback) UnmarshalPlist(unmarshal func(any) error) error {
+	targets := []*string{&c.first, &c.second}
+	errs := make([]error, len(targets))
+
+	var wg sync.WaitGroup
+	for i, target := range targets {
+		wg.Add(1)
+		go func(i int, target *string) {
+			defer wg.Done()
+			errs[i] = unmarshal(target)
+		}(i, target)
+	}
+	wg.Wait()
+
+	for _, err := range errs {
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func TestUnmarshalCallbackFromGoroutines(t *testing.T) {
+	var got concurrentCallback
+	if _, err := Unmarshal([]byte(`<string>s</string>`), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.first != "s" || got.second != "s" {
+		t.Errorf("decoded %q and %q, want \"s\" twice", got.first, got.second)
 	}
 }

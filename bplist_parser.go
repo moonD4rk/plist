@@ -37,7 +37,7 @@ type bplistParser struct {
 	containerStack []offset // slice of object offsets; manipulated during container deserialization
 
 	budget uint64 // see valueBudget
-	refs   uint64 // object references read so far
+	work   uint64 // object references and bytes of strings and data read so far
 }
 
 func (p *bplistParser) validateDocumentTrailer() {
@@ -224,6 +224,14 @@ func (p *bplistParser) checkBufferRange(start offset, length uint64) {
 	}
 }
 
+// Objects that do not overlap hold fewer references and payload bytes than the document has bytes.
+func (p *bplistParser) charge(n uint64) {
+	p.work += n
+	if p.work > p.budget {
+		panic(errTooManyValues)
+	}
+}
+
 func (p *bplistParser) pushNestedObject(off offset) {
 	// runzero patch: bound container-nesting depth. The existing
 	// loop only rejects an exact self-reference already on the stack; a chain
@@ -353,6 +361,7 @@ func (p *bplistParser) parseDataAtOffset(off offset) []byte {
 	if start+offset(count) > offset(p.trailer.OffsetTableOffset) {
 		panic(fmt.Errorf("data@0x%x too long (%v bytes, max is %v)", off, count, p.trailer.OffsetTableOffset-uint64(start)))
 	}
+	p.charge(count)
 	// The copy has no spare capacity, so appending to it cannot write into memory another reference sees.
 	data := make([]byte, count)
 	copy(data, p.buffer[start:])
@@ -365,6 +374,7 @@ func (p *bplistParser) parseASCIIStringAtOffset(off offset) string {
 		panic(fmt.Errorf("ascii string@0x%x too long (%v bytes, max is %v)", off, count, p.trailer.OffsetTableOffset-uint64(start)))
 	}
 
+	p.charge(count)
 	return string(p.buffer[start : start+offset(count)])
 }
 
@@ -375,6 +385,7 @@ func (p *bplistParser) parseUTF16StringAtOffset(off offset) string {
 		panic(fmt.Errorf("utf16 string@0x%x too long (%v bytes, max is %v)", off, byteLen, p.trailer.OffsetTableOffset-uint64(start)))
 	}
 
+	p.charge(byteLen)
 	u16s := make([]uint16, count)
 	for i := offset(0); i < offset(count); i++ {
 		u16s[i] = binary.BigEndian.Uint16(p.buffer[start+(i*2):])
@@ -383,15 +394,12 @@ func (p *bplistParser) parseUTF16StringAtOffset(off offset) string {
 	return string(runes)
 }
 
-// Counting references as they are read bounds parsing; limiting the shape bounds unmarshaling.
+// Charging references as they are read bounds parsing; limiting the shape bounds unmarshaling.
 func (p *bplistParser) parseObjectListAtOffset(off offset, count uint64) ([]cfValue, valueShape) {
 	if off+offset(count*uint64(p.trailer.ObjectRefSize)) > offset(p.trailer.OffsetTableOffset) {
 		panic(fmt.Errorf("list@0x%x length (%v) puts its end beyond the offset table at 0x%x", off, count, p.trailer.OffsetTableOffset))
 	}
-	p.refs += count
-	if p.refs > p.budget {
-		panic(errTooManyValues)
-	}
+	p.charge(count)
 	objects := make([]cfValue, count)
 	shape := valueShape{values: 1}
 

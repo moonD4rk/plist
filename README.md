@@ -126,7 +126,7 @@ type Example struct {
 `Unmarshal` and `Decoder.Decode` return an error for a document that asks for an unreasonable amount of work:
 
 - Containers nested deeper than about 128 levels.
-- A binary property list that holds more object references, or expands to more values once every reference to a shared object is followed, than the larger of its size in bytes and 524,288. A binary property list that shares no containers never reaches this limit.
+- A binary property list that exceeds its budget, the larger of its size in bytes and 524,288. Reading its objects may not take more object references and bytes of strings and data than the budget, which happens only when objects overlap, and it may not expand to more values than the budget once every reference to a shared object is followed. A binary property list that shares no containers never reaches the budget.
 
 ## Changes from upstream
 

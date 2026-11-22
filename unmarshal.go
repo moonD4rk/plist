@@ -2,6 +2,7 @@ package plist
 
 import (
 	"encoding"
+	"errors"
 	"fmt"
 	"reflect"
 	"runtime"
@@ -34,28 +35,34 @@ func (e *invalidDecodeTargetError) Error() string {
 	}
 }
 
-func (p *Decoder) settable(val reflect.Value) reflect.Value {
+var errNotSettable = errors.New("plist: decode target cannot be set")
+
+func settable(val reflect.Value) reflect.Value {
 	if !val.CanSet() {
-		panic(p.invalidTarget())
+		panic(errNotSettable)
 	}
 	return val
 }
 
-func (p *Decoder) invalidTarget() error {
-	target := p.target
-	if !target.IsValid() {
-		return &invalidDecodeTargetError{}
-	}
-	isNil := (target.Kind() == reflect.Ptr || target.Kind() == reflect.Map) && target.IsNil()
-	return &invalidDecodeTargetError{typ: target.Type(), isNil: isNil}
-}
-
+// unmarshalInto reports a value that cannot be set as a fault of v, the value the caller passed in.
 func (p *Decoder) unmarshalInto(pval cfValue, v any) {
-	outer := p.target
-	p.target = reflect.ValueOf(v)
-	defer func() { p.target = outer }()
+	target := reflect.ValueOf(v)
+	defer func() {
+		r := recover()
+		if r == nil {
+			return
+		}
+		if err, ok := r.(error); !ok || !errors.Is(err, errNotSettable) {
+			panic(r)
+		}
+		if !target.IsValid() {
+			panic(&invalidDecodeTargetError{})
+		}
+		isNil := (target.Kind() == reflect.Ptr || target.Kind() == reflect.Map) && target.IsNil()
+		panic(&invalidDecodeTargetError{typ: target.Type(), isNil: isNil})
+	}()
 
-	p.unmarshal(pval, p.target)
+	p.unmarshal(pval, target)
 }
 
 var (
@@ -99,26 +106,26 @@ func (p *Decoder) unmarshalTextInterface(pval cfString, unmarshalable encoding.T
 }
 
 func (p *Decoder) unmarshalTime(pval cfDate, val reflect.Value) {
-	p.settable(val).Set(reflect.ValueOf(time.Time(pval)))
+	settable(val).Set(reflect.ValueOf(time.Time(pval)))
 }
 
 func (p *Decoder) unmarshalLaxString(s string, val reflect.Value) {
 	switch val.Kind() {
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
 		i := mustParseInt(s, 10, 64)
-		p.settable(val).SetInt(i)
+		settable(val).SetInt(i)
 		return
 	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
 		i := mustParseUint(s, 10, 64)
-		p.settable(val).SetUint(i)
+		settable(val).SetUint(i)
 		return
 	case reflect.Float32, reflect.Float64:
 		f := mustParseFloat(s, 64)
-		p.settable(val).SetFloat(f)
+		settable(val).SetFloat(f)
 		return
 	case reflect.Bool:
 		b := mustParseBool(s)
-		p.settable(val).SetBool(b)
+		settable(val).SetBool(b)
 		return
 	case reflect.Struct:
 		if val.Type() == timeType {
@@ -126,7 +133,7 @@ func (p *Decoder) unmarshalLaxString(s string, val reflect.Value) {
 			if err != nil {
 				panic(err)
 			}
-			p.settable(val).Set(reflect.ValueOf(t.In(time.UTC)))
+			settable(val).Set(reflect.ValueOf(t.In(time.UTC)))
 			return
 		}
 		fallthrough
@@ -140,19 +147,19 @@ func (p *Decoder) unmarshal(pval cfValue, val reflect.Value) {
 		return
 	}
 	if !val.IsValid() {
-		panic(p.invalidTarget())
+		panic(errNotSettable)
 	}
 
 	for val.Kind() == reflect.Ptr {
 		if val.IsNil() {
-			p.settable(val).Set(reflect.New(val.Type().Elem()))
+			settable(val).Set(reflect.New(val.Type().Elem()))
 		}
 		val = val.Elem()
 	}
 
 	if isEmptyInterface(val) {
 		v := p.valueInterface(pval)
-		p.settable(val).Set(reflect.ValueOf(v))
+		settable(val).Set(reflect.ValueOf(v))
 		return
 	}
 
@@ -190,7 +197,7 @@ func (p *Decoder) unmarshal(pval cfValue, val reflect.Value) {
 	switch pval := pval.(type) {
 	case cfString:
 		if val.Kind() == reflect.String {
-			p.settable(val).SetString(string(pval))
+			settable(val).SetString(string(pval))
 			return
 		}
 		if p.lax {
@@ -202,22 +209,22 @@ func (p *Decoder) unmarshal(pval cfValue, val reflect.Value) {
 	case *cfNumber:
 		switch val.Kind() {
 		case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-			p.settable(val).SetInt(int64(pval.value))
+			settable(val).SetInt(int64(pval.value))
 		case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
-			p.settable(val).SetUint(pval.value)
+			settable(val).SetUint(pval.value)
 		default:
 			panic(incompatibleTypeError)
 		}
 	case *cfReal:
 		if val.Kind() == reflect.Float32 || val.Kind() == reflect.Float64 {
 			// TODO: Consider warning on a downcast (storing a 64-bit value in a 32-bit reflect)
-			p.settable(val).SetFloat(pval.value)
+			settable(val).SetFloat(pval.value)
 		} else {
 			panic(incompatibleTypeError)
 		}
 	case cfBoolean:
 		if val.Kind() == reflect.Bool {
-			p.settable(val).SetBool(bool(pval))
+			settable(val).SetBool(bool(pval))
 		} else {
 			panic(incompatibleTypeError)
 		}
@@ -233,24 +240,24 @@ func (p *Decoder) unmarshal(pval cfValue, val reflect.Value) {
 		b := []byte(pval)
 		switch val.Kind() {
 		case reflect.Slice:
-			p.settable(val).SetBytes(b)
+			settable(val).SetBytes(b)
 		case reflect.Array:
 			if val.Len() < len(b) {
 				panic(fmt.Errorf("plist: attempted to unmarshal %d bytes into a byte array of size %d", len(b), val.Len()))
 			}
-			copy(p.settable(val).Bytes(), b)
+			copy(settable(val).Bytes(), b)
 		default:
 			panic(incompatibleTypeError)
 		}
 	case cfUID:
 		if val.Type() == uidType {
-			p.settable(val).SetUint(uint64(pval))
+			settable(val).SetUint(uint64(pval))
 		} else {
 			switch val.Kind() {
 			case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-				p.settable(val).SetInt(int64(pval))
+				settable(val).SetInt(int64(pval))
 			case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
-				p.settable(val).SetUint(uint64(pval))
+				settable(val).SetUint(uint64(pval))
 			default:
 				panic(incompatibleTypeError)
 			}
@@ -268,7 +275,7 @@ func (p *Decoder) unmarshalArray(a *cfArray, val reflect.Value) {
 	case reflect.Slice:
 		// Slice of element values.
 		// Grow slice.
-		p.settable(val)
+		settable(val)
 		cnt := len(a.values) + val.Len()
 		if cnt > val.Cap() {
 			ncap := val.Cap()
@@ -329,7 +336,7 @@ func (p *Decoder) unmarshalDictionary(dict *cfDictionary, val reflect.Value) {
 		}
 	case reflect.Map:
 		if val.IsNil() {
-			p.settable(val).Set(reflect.MakeMap(typ))
+			settable(val).Set(reflect.MakeMap(typ))
 		}
 
 		if !stringType.ConvertibleTo(val.Type().Key()) {

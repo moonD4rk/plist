@@ -12,9 +12,11 @@ var (
 	timeType           = reflect.TypeOf((*time.Time)(nil)).Elem()
 )
 
-// A method declared on the element type cannot be called through a nil pointer.
-func isNilValueReceiver(itf any, interfaceType reflect.Type) bool {
-	val := reflect.ValueOf(itf)
+// A method declared on the element type cannot be called through a nil pointer, so the pointer is left out.
+func isNilValueReceiver(val reflect.Value, interfaceType reflect.Type) bool {
+	for val.Kind() == reflect.Interface && !val.IsNil() {
+		val = val.Elem()
+	}
 	return val.Kind() == reflect.Ptr && val.IsNil() && val.Type().Elem().Implements(interfaceType)
 }
 
@@ -22,9 +24,6 @@ func implementsInterface(val reflect.Value, interfaceType reflect.Type) (any, bo
 	if val.CanInterface() {
 		itf := val.Interface()
 		if itf != nil && reflect.TypeOf(itf).Implements(interfaceType) {
-			if isNilValueReceiver(itf, interfaceType) {
-				return nil, false
-			}
 			return itf, true
 		}
 	}
@@ -98,6 +97,9 @@ func (p *Encoder) marshal(val reflect.Value) cfValue {
 		return nil
 	}
 
+	if isNilValueReceiver(val, plistMarshalerType) {
+		return nil
+	}
 	if receiver, can := implementsInterface(val, plistMarshalerType); can {
 		m, _ := receiver.(Marshaler)
 		return p.marshalPlistInterface(m)
@@ -115,6 +117,9 @@ func (p *Encoder) marshal(val reflect.Value) cfValue {
 	}
 
 	// Check for text marshaler.
+	if isNilValueReceiver(val, textMarshalerType) {
+		return nil
+	}
 	if receiver, can := implementsInterface(val, textMarshalerType); can {
 		tm, _ := receiver.(encoding.TextMarshaler)
 		return p.marshalTextInterface(tm)

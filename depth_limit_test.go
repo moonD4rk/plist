@@ -229,6 +229,18 @@ func overlappingBplist(count int) []byte {
 	return assembleBplist(objects, append(ids, 2))
 }
 
+// aliasedBplist points count object IDs at the bytes of one string or data object.
+func aliasedBplist(tag byte, units, unitSize, count int) []byte {
+	object := append(bplistCount(tag, units), make([]byte, units*unitSize)...)
+	ids := []int{0}
+	refs := make([]int, count)
+	for i := range refs {
+		refs[i] = i + 1
+		ids = append(ids, 1)
+	}
+	return assembleBplist([][]byte{bplistArray(refs...), object}, ids)
+}
+
 // sharedArrayBplist refers to one array of size strings from a root array, references times.
 func sharedArrayBplist(references, size int) []byte {
 	objects := [][]byte{
@@ -247,6 +259,9 @@ func TestBplistValueBudget(t *testing.T) {
 	}{
 		{"two references per level", doublingBplist(21), errTooManyValues},
 		{"object IDs sharing one encoding", overlappingBplist(2000), errTooManyValues},
+		{"object IDs sharing one data object", aliasedBplist(bpTagData, 4096, 1, 2000), errTooManyValues},
+		{"object IDs sharing one ASCII string", aliasedBplist(bpTagASCIIString, 4096, 1, 2000), errTooManyValues},
+		{"object IDs sharing one UTF-16 string", aliasedBplist(bpTagUTF16String, 2048, 2, 2000), errTooManyValues},
 		{"shared array over the budget", sharedArrayBplist(6000, 100), errTooManyValues},
 		{"depth reached through parsed objects", stagedChainBplist(), errMaxDepthExceeded},
 	}
@@ -289,6 +304,47 @@ func TestBplistValueBudgetGrowsWithDocument(t *testing.T) {
 	}
 	if len(out) != elements {
 		t.Fatalf("decoded %d elements, want %d", len(out), elements)
+	}
+
+	large := struct {
+		Data  []byte
+		ASCII string
+		UTF16 string
+	}{make([]byte, elements), strings.Repeat("a", elements), strings.Repeat("é", elements)}
+	if data, err = Marshal(large, BinaryFormat); err != nil {
+		t.Fatal(err)
+	}
+	back := large
+	back.Data, back.ASCII, back.UTF16 = nil, "", ""
+	if _, err := Unmarshal(data, &back); err != nil {
+		t.Fatal(err)
+	}
+	if len(back.Data) != elements || back.ASCII != large.ASCII || back.UTF16 != large.UTF16 {
+		t.Fatalf("decoded %d bytes of data and strings of %d and %d bytes", len(back.Data), len(back.ASCII), len(back.UTF16))
+	}
+}
+
+func TestBplistSharedDataWithinBudget(t *testing.T) {
+	const references = 1000
+	blob := make([]byte, 100000)
+
+	shared := make([][]byte, references)
+	for i := range shared {
+		shared[i] = blob
+	}
+	data, err := Marshal(shared, BinaryFormat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(data) > 2*len(blob) {
+		t.Fatalf("the document is %d bytes, want the data stored once", len(data))
+	}
+	var out [][]byte
+	if _, err := Unmarshal(data, &out); err != nil {
+		t.Fatal(err)
+	}
+	if len(out) != references || len(out[references-1]) != len(blob) {
+		t.Fatalf("decoded %d values, want %d of %d bytes", len(out), references, len(blob))
 	}
 }
 

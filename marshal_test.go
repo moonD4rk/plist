@@ -1,6 +1,7 @@
 package plist
 
 import (
+	"encoding"
 	"reflect"
 	"testing"
 	"time"
@@ -168,13 +169,16 @@ func TestMarshalNilStructField(t *testing.T) {
 		Plist     *valueMarshaler
 		Text      *valueTextMarshaler
 		Nothing   nilMarshaler
+		PlistNil  Marshaler
+		TextNil   encoding.TextMarshaler
 	}
+	value := record{Name: "n", PlistNil: (*valueMarshaler)(nil), TextNil: (*valueTextMarshaler)(nil)}
 	want := map[string]string{"Name": "n"}
 
 	for _, format := range allFormats {
 		t.Run(FormatNames[format], func(t *testing.T) {
 			var got map[string]string
-			marshalThenUnmarshal(t, record{Name: "n"}, format, &got)
+			marshalThenUnmarshal(t, value, format, &got)
 			if !reflect.DeepEqual(got, want) {
 				t.Errorf("decoded %#v, want %#v", got, want)
 			}
@@ -189,6 +193,8 @@ func TestMarshalNilPointerToValueReceiver(t *testing.T) {
 		"TextMarshaler":  []*valueTextMarshaler{nil},
 		"map value":      map[string]*valueTextMarshaler{"a": nil},
 		"pointer in any": []any{(*valueMarshaler)(nil)},
+		"Marshaler list": []Marshaler{(*valueMarshaler)(nil)},
+		"text list":      []encoding.TextMarshaler{(*valueTextMarshaler)(nil)},
 	}
 	for name, value := range values {
 		for _, format := range allFormats {
