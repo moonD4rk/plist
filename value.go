@@ -25,30 +25,30 @@ func (*cfDict) typeName() string {
 	return "dictionary"
 }
 
-func (p *cfDict) hash() any {
-	return p
+func (d *cfDict) hash() any {
+	return d
 }
 
-func (p *cfDict) Len() int {
-	return len(p.keys)
+func (d *cfDict) Len() int {
+	return len(d.keys)
 }
 
-func (p *cfDict) Less(i, j int) bool {
-	return p.keys.Less(i, j)
+func (d *cfDict) Less(i, j int) bool {
+	return d.keys.Less(i, j)
 }
 
-func (p *cfDict) Swap(i, j int) {
-	p.keys.Swap(i, j)
-	p.values[i], p.values[j] = p.values[j], p.values[i]
+func (d *cfDict) Swap(i, j int) {
+	d.keys.Swap(i, j)
+	d.values[i], d.values[j] = d.values[j], d.values[i]
 }
 
-func (p *cfDict) sort() {
-	sort.Sort(p)
+func (d *cfDict) sort() {
+	sort.Sort(d)
 }
 
-func (p *cfDict) maybeUID(coerceStrings bool) cfValue {
-	if len(p.keys) == 1 && p.keys[0] == cfUIDMagic && len(p.values) == 1 {
-		value := p.values[0]
+func (d *cfDict) maybeUID(coerceStrings bool) cfValue {
+	if len(d.keys) == 1 && d.keys[0] == cfUIDMagic && len(d.values) == 1 {
+		value := d.values[0]
 		if integer, ok := value.(*cfInteger); ok {
 			return cfUID(integer.value)
 		}
@@ -61,7 +61,7 @@ func (p *cfDict) maybeUID(coerceStrings bool) cfValue {
 			}
 		}
 	}
-	return p
+	return d
 }
 
 type cfArray struct {
@@ -72,8 +72,8 @@ func (*cfArray) typeName() string {
 	return "array"
 }
 
-func (p *cfArray) hash() any {
-	return p
+func (a *cfArray) hash() any {
+	return a
 }
 
 type cfString string
@@ -82,8 +82,8 @@ func (cfString) typeName() string {
 	return "string"
 }
 
-func (p cfString) hash() any {
-	return string(p)
+func (s cfString) hash() any {
+	return string(s)
 }
 
 type cfInteger struct {
@@ -95,11 +95,11 @@ func (*cfInteger) typeName() string {
 	return "integer"
 }
 
-func (p *cfInteger) hash() any {
-	if p.signed {
-		return int64(p.value)
+func (n *cfInteger) hash() any {
+	if n.signed {
+		return int64(n.value)
 	}
-	return p.value
+	return n.value
 }
 
 type cfReal struct {
@@ -117,11 +117,11 @@ type realKey struct {
 	is32 bool
 }
 
-func (p *cfReal) hash() any {
-	if p.is32 {
-		return realKey{bits: uint64(math.Float32bits(float32(p.value))), is32: true}
+func (r *cfReal) hash() any {
+	if r.is32 {
+		return realKey{bits: uint64(math.Float32bits(float32(r.value))), is32: true}
 	}
-	return realKey{bits: math.Float64bits(p.value)}
+	return realKey{bits: math.Float64bits(r.value)}
 }
 
 type cfBool bool
@@ -130,8 +130,8 @@ func (cfBool) typeName() string {
 	return "boolean"
 }
 
-func (p cfBool) hash() any {
-	return bool(p)
+func (b cfBool) hash() any {
+	return bool(b)
 }
 
 type cfUID UID
@@ -140,16 +140,16 @@ func (cfUID) typeName() string {
 	return "UID"
 }
 
-func (p cfUID) hash() any {
-	return p
+func (u cfUID) hash() any {
+	return u
 }
 
-func (p cfUID) toDict() *cfDict {
+func (u cfUID) toDict() *cfDict {
 	return &cfDict{
 		keys: []string{cfUIDMagic},
 		values: []cfValue{&cfInteger{
 			signed: false,
-			value:  uint64(p),
+			value:  uint64(u),
 		}},
 	}
 }
@@ -163,8 +163,8 @@ func (cfData) typeName() string {
 // dataKey views the bytes as a string, so data are uniqued by their contents without being copied.
 type dataKey string
 
-func (p cfData) hash() any {
-	return dataKey(zeroCopy8BitString(p, 0, len(p)))
+func (d cfData) hash() any {
+	return dataKey(zeroCopy8BitString(d, 0, len(d)))
 }
 
 type cfDate time.Time
@@ -173,6 +173,6 @@ func (cfDate) typeName() string {
 	return "date"
 }
 
-func (p cfDate) hash() any {
-	return time.Time(p)
+func (d cfDate) hash() any {
+	return time.Time(d)
 }
