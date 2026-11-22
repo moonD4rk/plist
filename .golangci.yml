@@ -171,4 +171,4 @@ formatters:
       extra-rules: true
     goimports:
       local-prefixes:
-        - github.com/moond4rk/plist
+        - github.com/moond4rk/plist/v2
