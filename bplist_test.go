@@ -3,8 +3,12 @@ package plist
 import (
 	"bytes"
 	"encoding/binary"
+	"fmt"
+	"hash/crc32"
 	"math"
+	"reflect"
 	"testing"
+	"time"
 )
 
 func TestBplistInt128(t *testing.T) {
@@ -155,4 +159,137 @@ func TestBplistNonPowerOfTwoOffsetIntSizes(t *testing.T) {
 	if err != nil {
 		t.Error("Unexpected error", err)
 	}
+}
+
+func TestBplistDecodedValuesDoNotShareMemory(t *testing.T) {
+	const text = "the string that follows the data"
+	data, err := Marshal(map[string]any{"a": []byte{1, 2, 3, 4}, "b": text}, BinaryFormat)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var out struct {
+		A []byte `plist:"a"`
+		B string `plist:"b"`
+	}
+	if _, err := Unmarshal(data, &out); err != nil {
+		t.Fatal(err)
+	}
+
+	grown := append(out.A, bytes.Repeat([]byte{0xFF}, len(data))...)
+	if out.B != text {
+		t.Errorf("appending to the decoded data changed the decoded string to %q", out.B)
+	}
+	if !bytes.Equal(grown[:4], []byte{1, 2, 3, 4}) {
+		t.Errorf("decoded data = %v, want [1 2 3 4]", grown[:4])
+	}
+
+	if data, err = Marshal([][]byte{{1, 2, 3}, {1, 2, 3}}, BinaryFormat); err != nil {
+		t.Fatal(err)
+	}
+	var equal [][]byte
+	if _, err := Unmarshal(data, &equal); err != nil {
+		t.Fatal(err)
+	}
+	first, second := append(equal[0], 4), append(equal[1], 5)
+	if first[3] != 4 || second[3] != 5 {
+		t.Errorf("appending to equal data gave %v and %v, want [1 2 3 4] and [1 2 3 5]", first, second)
+	}
+}
+
+func TestBplistDataWithEqualChecksums(t *testing.T) {
+	first, second := []byte("plumless"), []byte("buckeroo")
+	if crc32.ChecksumIEEE(first) != crc32.ChecksumIEEE(second) {
+		t.Fatal("the test needs two values with one CRC-32 checksum")
+	}
+
+	want := [][]byte{first, second, first, []byte("other"), second}
+	data, err := Marshal(want, BinaryFormat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got [][]byte
+	if _, err := Unmarshal(data, &got); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("decoded %q, want %q", got, want)
+	}
+
+	var root []byte
+	if data, err = Marshal(second, BinaryFormat); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Unmarshal(data, &root); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(root, second) {
+		t.Errorf("decoded %q, want %q", root, second)
+	}
+}
+
+func TestBplistDatesOutsideUnixNanoRange(t *testing.T) {
+	dates := []time.Time{
+		{},
+		time.Date(1, 1, 1, 0, 0, 0, 500000000, time.UTC),
+		time.Date(1600, 2, 29, 12, 30, 15, 0, time.UTC),
+		time.Date(1677, 9, 21, 0, 12, 43, 0, time.UTC),
+		time.Date(2262, 4, 11, 23, 47, 17, 0, time.UTC),
+		time.Date(3000, 1, 1, 0, 0, 0, 0, time.UTC),
+		time.Date(9999, 12, 31, 23, 59, 59, 0, time.UTC),
+	}
+	for _, want := range dates {
+		data, err := Marshal(want, BinaryFormat)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got time.Time
+		if _, err := Unmarshal(data, &got); err != nil {
+			t.Fatal(err)
+		}
+		if !got.Equal(want) {
+			t.Errorf("decoded %v, want %v", got, want)
+		}
+	}
+
+	data, err := Marshal(time.Time{}, BinaryFormat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if seconds := math.Float64frombits(binary.BigEndian.Uint64(data[9:])); seconds != -63113904000 {
+		t.Errorf("the zero time is stored as %v seconds from 2001, want -63113904000", seconds)
+	}
+}
+
+func TestBplistRealsAreUniquedByBits(t *testing.T) {
+	negativeZero := math.Copysign(0, -1)
+	want := []any{0.0, negativeZero, math.NaN(), float32(0), float32(negativeZero), float32(math.NaN()), math.NaN(), 0.0}
+
+	data, err := Marshal(map[string]any{"reals": want}, BinaryFormat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out map[string][]any
+	if _, err := Unmarshal(data, &out); err != nil {
+		t.Fatal(err)
+	}
+	got := out["reals"]
+	if len(got) != len(want) {
+		t.Fatalf("decoded %d reals, want %d", len(got), len(want))
+	}
+	for i := range want {
+		if realBits(got[i]) != realBits(want[i]) {
+			t.Errorf("real %d decoded as %#v, want %#v", i, got[i], want[i])
+		}
+	}
+}
+
+func realBits(v any) string {
+	switch v := v.(type) {
+	case float64:
+		return fmt.Sprintf("float64 %016x", math.Float64bits(v))
+	case float32:
+		return fmt.Sprintf("float32 %08x", math.Float32bits(v))
+	}
+	return fmt.Sprintf("%T", v)
 }

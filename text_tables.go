@@ -28,9 +28,9 @@ var gsQuotable = characterSet{
 }
 
 // 7f instead of 3f in the top line: CFOldStylePlist.c says . is valid, but they quote it.
-// ef instead og 6f in the top line: ' will be quoted
+// ef instead of 6f in the top line: ' will be quoted
 var osQuotable = characterSet{
-	0xf4007fefffffffff,
+	0xfc007fefffffffff,
 	0xf8000001f8000001,
 	0xffffffffffffffff,
 	0xffffffffffffffff,

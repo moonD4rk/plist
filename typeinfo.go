@@ -58,6 +58,11 @@ var (
 // getTypeInfo returns the typeInfo structure with details necessary
 // for marshaling and unmarshaling typ.
 func getTypeInfo(typ reflect.Type) (*typeInfo, error) {
+	return typeInfoWithin(typ, nil)
+}
+
+// typeInfoWithin stops at a type in embedding: its fields are already promoted from a shallower level.
+func typeInfoWithin(typ reflect.Type, embedding []reflect.Type) (*typeInfo, error) {
 	tinfoLock.RLock()
 	tinfo, ok := tinfoMap[typ]
 	tinfoLock.RUnlock()
@@ -66,11 +71,12 @@ func getTypeInfo(typ reflect.Type) (*typeInfo, error) {
 	}
 	tinfo = &typeInfo{}
 	if typ.Kind() == reflect.Struct {
+		embedding = append(embedding, typ)
 		n := typ.NumField()
 		for i := 0; i < n; i++ {
 			f := typ.Field(i)
 			if f.PkgPath != "" || f.Tag.Get("plist") == "-" {
-				continue // Private field
+				continue // unexported, or excluded with plist:"-"
 			}
 
 			finfo, err := structFieldInfo(typ, &f)
@@ -85,16 +91,8 @@ func getTypeInfo(typ reflect.Type) (*typeInfo, error) {
 					t = t.Elem()
 				}
 				if t.Kind() == reflect.Struct {
-					inner, err := getTypeInfo(t)
-					if err != nil {
+					if err := addEmbeddedFields(typ, tinfo, finfo, t, embedding); err != nil {
 						return nil, err
-					}
-					for _, innerFinfo := range inner.fields {
-						innerFinfo.idx = append(finfo.idx, innerFinfo.idx...)
-						innerFinfo.omitEmptyDepthMap = finfo.omitEmptyDepthMap | (innerFinfo.omitEmptyDepthMap << uint(len(finfo.idx)))
-						if err := addFieldInfo(typ, tinfo, &innerFinfo); err != nil {
-							return nil, err
-						}
 					}
 					continue
 				}
@@ -106,17 +104,46 @@ func getTypeInfo(typ reflect.Type) (*typeInfo, error) {
 			}
 		}
 	}
-	tinfoLock.Lock()
-	tinfoMap[typ] = tinfo
-	tinfoLock.Unlock()
+	// A nested result may lack fields cut off by an outer type in embedding, so only top-level results are cached.
+	if len(embedding) <= 1 {
+		tinfoLock.Lock()
+		tinfoMap[typ] = tinfo
+		tinfoLock.Unlock()
+	}
 	return tinfo, nil
+}
+
+func addEmbeddedFields(typ reflect.Type, tinfo *typeInfo, field *fieldInfo, embedded reflect.Type, embedding []reflect.Type) error {
+	if containsType(embedding, embedded) {
+		return nil
+	}
+	inner, err := typeInfoWithin(embedded, embedding)
+	if err != nil {
+		return err
+	}
+	for _, innerFinfo := range inner.fields {
+		innerFinfo.idx = append(field.idx, innerFinfo.idx...)
+		innerFinfo.omitEmptyDepthMap = field.omitEmptyDepthMap | (innerFinfo.omitEmptyDepthMap << uint(len(field.idx)))
+		if err := addFieldInfo(typ, tinfo, &innerFinfo); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func containsType(types []reflect.Type, typ reflect.Type) bool {
+	for _, t := range types {
+		if t == typ {
+			return true
+		}
+	}
+	return false
 }
 
 // structFieldInfo builds and returns a fieldInfo for f.
 func structFieldInfo(typ reflect.Type, f *reflect.StructField) (*fieldInfo, error) {
 	finfo := &fieldInfo{idx: f.Index}
 
-	// Split the tag from the xml namespace if necessary.
 	tag := f.Tag.Get("plist")
 
 	// Parse flags.
@@ -143,13 +170,7 @@ func structFieldInfo(typ reflect.Type, f *reflect.StructField) (*fieldInfo, erro
 	return finfo, nil
 }
 
-// addFieldInfo adds finfo to tinfo.fields if there are no
-// conflicts, or if conflicts arise from previous fields that were
-// obtained from deeper embedded structures than finfo. In the latter
-// case, the conflicting entries are dropped.
-// A conflict occurs when the path (parent + name) to a field is
-// itself a prefix of another path, or when two paths match exactly.
-// It is okay for field paths to share a common, shorter prefix.
+// addFieldInfo adds newf unless a field of the same name is embedded less deeply; it replaces those that are not.
 func addFieldInfo(typ reflect.Type, tinfo *typeInfo, newf *fieldInfo) error {
 	var conflicts []int
 	// First, figure all conflicts. Most working code will have none.
@@ -187,13 +208,17 @@ func addFieldInfo(typ reflect.Type, tinfo *typeInfo, newf *fieldInfo) error {
 
 // valueForWriting returns v's field value corresponding to finfo.
 // It's equivalent to v.FieldByIndex(finfo.idx), but initializes
-// and dereferences pointers as necessary.
+// and dereferences pointers as necessary. It returns the zero Value
+// if it cannot initialize a nil pointer on the way.
 func (finfo *fieldInfo) valueForWriting(v reflect.Value) reflect.Value {
 	for i, x := range finfo.idx {
 		if i > 0 {
 			t := v.Type()
 			if t.Kind() == reflect.Ptr && t.Elem().Kind() == reflect.Struct {
 				if v.IsNil() {
+					if !v.CanSet() {
+						return reflect.Value{}
+					}
 					v.Set(reflect.New(v.Type().Elem()))
 				}
 				v = v.Elem()
@@ -204,13 +229,14 @@ func (finfo *fieldInfo) valueForWriting(v reflect.Value) reflect.Value {
 	return v
 }
 
-// valueForWriting returns v's field value corresponding to finfo.
-// It's equivalent to v.FieldByIndex(finfo.idx), but bails out if one of the
-// indices indicated that it should be omitted if it's empty and it is empty.
+// value is v.FieldByIndex(finfo.idx), or the zero Value past a nil embedded pointer or an empty omitempty level.
 func (finfo *fieldInfo) value(v reflect.Value) reflect.Value {
 	for i, x := range finfo.idx {
 		t := v.Type()
 		if t.Kind() == reflect.Ptr && t.Elem().Kind() == reflect.Struct {
+			if v.IsNil() {
+				return reflect.Value{}
+			}
 			v = v.Elem()
 		}
 

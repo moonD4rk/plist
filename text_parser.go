@@ -55,7 +55,7 @@ func guessEncodingAndConvert(buffer []byte) (string, error) {
 		case (buffer[0] == 0 && buffer[1] != 0):
 			return convertU16(buffer, binary.BigEndian)
 
-		// stream is little-endian (BOM is FE FF or head is XX 00)
+		// stream is little-endian (BOM is FF FE or head is XX 00)
 		case (buffer[0] == 0xFF && buffer[1] == 0xFE):
 			return convertU16(buffer[2:], binary.LittleEndian)
 		case (buffer[0] != 0 && buffer[1] == 0):
@@ -77,7 +77,6 @@ func (p *textPlistParser) parseDocument() (pval cfValue, parseError error) {
 			if !ok {
 				panic(r)
 			}
-			// Wrap all non-invalid-plist errors.
 			parseError = plistParseError{"text", err}
 		}
 	}()
@@ -113,7 +112,7 @@ func (p *textPlistParser) parseDocument() (pval cfValue, parseError error) {
 
 const eof rune = -1
 
-func (p *textPlistParser) error(e string, args ...interface{}) {
+func (p *textPlistParser) error(e string, args ...any) {
 	line := strings.Count(p.input[:p.pos], "\n")
 	char := p.pos - strings.LastIndex(p.input[:p.pos], "\n") - 1
 	panic(fmt.Errorf("%s at line %d character %d", fmt.Sprintf(e, args...), line, char))
@@ -289,7 +288,7 @@ func (p *textPlistParser) parseQuotedString() cfString {
 	p.ignore() // ignore the "
 
 	slowPath := false
-	s := ""
+	var s strings.Builder
 
 	for {
 		p.scanUntilAny(`"\`)
@@ -303,13 +302,13 @@ func (p *textPlistParser) parseQuotedString() cfString {
 				return cfString(section)
 			}
 
-			s += section
-			return cfString(s)
+			s.WriteString(section)
+			return cfString(s.String())
 		case '\\':
 			slowPath = true
-			s += p.emit()
+			s.WriteString(p.emit())
 			p.next() // consume \
-			s += p.parseEscape()
+			s.WriteString(p.parseEscape())
 		}
 	}
 }
@@ -327,8 +326,8 @@ func (p *textPlistParser) parseUnquotedString() cfString {
 // the { has already been consumed
 func (p *textPlistParser) parseDictionary(ignoreEOF bool) cfValue {
 	var keypv cfValue
-	keys := make([]string, 0, 32)
-	values := make([]cfValue, 0, 32)
+	var keys []string
+	var values []cfValue
 outer:
 	for {
 		p.skipWhitespaceAndComments()
@@ -388,7 +387,7 @@ outer:
 
 // the ( has already been consumed
 func (p *textPlistParser) parseArray() *cfArray {
-	values := make([]cfValue, 0, 32)
+	var values []cfValue
 outer:
 	for {
 		p.skipWhitespaceAndComments()
@@ -404,13 +403,7 @@ outer:
 			p.backup()
 		}
 
-		pval := p.parsePlistValue() // whitespace is consumed within
-		if str, ok := pval.(cfString); ok && string(str) == "" {
-			// Empty strings in arrays are apparently skipped?
-			// TODO: Figure out why this was implemented.
-			continue
-		}
-		values = append(values, pval)
+		values = append(values, p.parsePlistValue()) // whitespace is consumed within
 	}
 	return &cfArray{values}
 }
@@ -510,8 +503,7 @@ func (p *textPlistParser) parseGNUStepBase64() cfData {
 
 // The < has already been consumed
 func (p *textPlistParser) parseHexData() cfData {
-	buf := make([]byte, 256)
-	i := 0
+	buf := []byte{}
 	c := 0
 
 	for {
@@ -524,34 +516,31 @@ func (p *textPlistParser) parseHexData() cfData {
 				p.error("uneven number of hex digits in data")
 			}
 			p.ignore()
-			return cfData(buf[:i])
+			return cfData(buf)
 		// Apple and GNUstep both want these in pairs. We are a bit more lax.
 		// GS accepts comments too, but that seems like a lot of work.
 		case ' ', '\t', '\n', '\r', '\u2028', '\u2029':
 			continue
 		}
 
-		buf[i] <<= 4
+		var nibble byte
 		switch {
 		case r >= 'a' && r <= 'f':
-			buf[i] |= 10 + byte((r - 'a'))
+			nibble = 10 + byte((r - 'a'))
 		case r >= 'A' && r <= 'F':
-			buf[i] |= 10 + byte((r - 'A'))
+			nibble = 10 + byte((r - 'A'))
 		case r >= '0' && r <= '9':
-			buf[i] |= byte((r - '0'))
+			nibble = byte((r - '0'))
 		default:
 			p.error("unexpected hex digit `%c'", r)
 		}
 
-		c++
 		if c&1 == 0 {
-			i++
-			if i >= len(buf) {
-				realloc := make([]byte, len(buf)*2)
-				copy(realloc, buf)
-				buf = realloc
-			}
+			buf = append(buf, nibble<<4)
+		} else {
+			buf[len(buf)-1] |= nibble
 		}
+		c++
 	}
 }
 

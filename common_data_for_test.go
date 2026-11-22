@@ -364,7 +364,7 @@ var tests = []TestData{
 		Name:  "Floats of Increasing Bitness",
 		Value: []any{float32(math.MaxFloat32), float64(math.MaxFloat64)},
 		Documents: map[int][]byte{
-			OpenStepFormat: []byte(`(3.4028234663852886e+38,1.7976931348623157e+308,)`),
+			OpenStepFormat: []byte(`("3.4028234663852886e+38","1.7976931348623157e+308",)`),
 			GNUStepFormat:  []byte(`(<*R3.4028234663852886e+38>,<*R1.7976931348623157e+308>,)`),
 			XMLFormat:      []byte(xmlPreamble + `<plist version="1.0"><array><real>3.4028234663852886e+38</real><real>1.7976931348623157e+308</real></array></plist>`),
 			BinaryFormat:   {98, 112, 108, 105, 115, 116, 48, 48, 162, 1, 2, 34, 127, 127, 255, 255, 35, 127, 239, 255, 255, 255, 255, 255, 255, 8, 11, 16, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 25},
@@ -520,7 +520,7 @@ var tests = []TestData{
 		Name:  "Floating-Point Infinity",
 		Value: math.Inf(1),
 		Documents: map[int][]byte{
-			OpenStepFormat: []byte(`+Inf`),
+			OpenStepFormat: []byte(`"+Inf"`),
 			GNUStepFormat:  []byte(`<*R+Inf>`),
 			XMLFormat:      []byte(xmlPreamble + `<plist version="1.0"><real>inf</real></plist>`),
 			BinaryFormat:   {98, 112, 108, 105, 115, 116, 48, 48, 35, 127, 240, 0, 0, 0, 0, 0, 0, 8, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 17},
@@ -768,7 +768,7 @@ var tests = []TestData{
 	},
 	{
 		Name:  "Empty Strings in Arrays",
-		Value: []string{"A"},
+		Value: []string{"A", ""},
 		Documents: map[int][]byte{
 			OpenStepFormat: []byte(`(A,,,"",)`),
 		},

@@ -9,7 +9,7 @@ import (
 
 const fuzzMaxInputSize = 1 << 16
 
-var fuzzFormats = []int{XMLFormat, BinaryFormat, OpenStepFormat, GNUStepFormat}
+var allFormats = []int{XMLFormat, BinaryFormat, OpenStepFormat, GNUStepFormat}
 
 type fuzzRecord struct {
 	Name    string
@@ -87,6 +87,9 @@ func FuzzUnmarshalBinary(f *testing.F) {
 	for _, doc := range InvalidBplists {
 		f.Add(doc)
 	}
+	f.Add(doublingBplist(21))
+	f.Add(stagedChainBplist())
+	f.Add(overlappingBplist(2000))
 	f.Fuzz(fuzzUnmarshal)
 }
 
@@ -104,7 +107,7 @@ func FuzzUnmarshalGNUstep(f *testing.F) {
 }
 
 func FuzzReencode(f *testing.F) {
-	for _, format := range fuzzFormats {
+	for _, format := range allFormats {
 		addDocumentSeeds(f, format)
 	}
 	f.Fuzz(func(t *testing.T, data []byte) {
@@ -115,7 +118,7 @@ func FuzzReencode(f *testing.F) {
 		if _, err := Unmarshal(data, &value); err != nil {
 			t.Skip()
 		}
-		for _, format := range fuzzFormats {
+		for _, format := range allFormats {
 			_, _ = Marshal(value, format)
 		}
 	})

@@ -35,7 +35,8 @@ func (p *textPlistGenerator) plistQuotedString(str string) string {
 	}
 	var b strings.Builder
 	b.Grow(len(str))
-	quot := false
+	// Unquoted, either prefix would start a comment.
+	quot := strings.HasPrefix(str, "//") || strings.HasPrefix(str, "/*")
 	for _, r := range str {
 		switch {
 		case r > 0xFF:
@@ -157,13 +158,16 @@ func (p *textPlistGenerator) writePlistValue(pval cfValue) {
 			p.writer.Write([]byte(`>`))
 		}
 	case *cfReal:
-		if p.format == GNUStepFormat {
-			p.writer.Write([]byte(`<*R`))
-		}
 		// GNUstep does not differentiate between 32/64-bit floats.
-		io.WriteString(p.writer, strconv.FormatFloat(pval.value, 'g', -1, 64))
-		if p.format == GNUStepFormat {
-			p.writer.Write([]byte(`>`))
+		num := strconv.FormatFloat(pval.value, 'g', -1, 64)
+		switch {
+		case p.format == GNUStepFormat:
+			io.WriteString(p.writer, `<*R`+num+`>`)
+		case strings.Contains(num, "+"):
+			// CoreFoundation does not read + in an unquoted string.
+			io.WriteString(p.writer, `"`+num+`"`)
+		default:
+			io.WriteString(p.writer, num)
 		}
 	case cfBoolean:
 		if p.format == GNUStepFormat {

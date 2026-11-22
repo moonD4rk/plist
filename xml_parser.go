@@ -165,8 +165,8 @@ func (p *xmlPlistParser) parseXMLElement(element xml.StartElement) cfValue {
 	case "dict":
 		p.ntags++
 		var key *string
-		keys := make([]string, 0, 32)
-		values := make([]cfValue, 0, 32)
+		var keys []string
+		var values []cfValue
 		for {
 			token, err := p.xmlDecoder.Token()
 			if err != nil {
@@ -200,7 +200,7 @@ func (p *xmlPlistParser) parseXMLElement(element xml.StartElement) cfValue {
 		return dict.maybeUID(false)
 	case "array":
 		p.ntags++
-		values := make([]cfValue, 0, 10)
+		var values []cfValue
 		for {
 			token, err := p.xmlDecoder.Token()
 			if err != nil {
@@ -219,7 +219,7 @@ func (p *xmlPlistParser) parseXMLElement(element xml.StartElement) cfValue {
 	}
 	err := fmt.Errorf("encountered unknown element %s", element.Name.Local)
 	if p.ntags == 0 {
-		// If out first XML tag is invalid, it might be an openstep data element, ala <abab> or <0101>
+		// If our first XML tag is invalid, it might be an openstep data element, ala <abab> or <0101>
 		panic(invalidPlistError{"XML", err})
 	}
 	panic(err)

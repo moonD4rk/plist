@@ -18,16 +18,26 @@ const (
 
 type offset uint64
 
+// valueShape measures an object with every shared reference followed, which is how it gets unmarshaled.
+type valueShape struct {
+	values uint64 // values in the tree, the object itself included
+	depth  int    // levels of nested containers
+}
+
 type bplistParser struct {
 	buffer []byte
 
 	reader        io.ReadSeeker
 	version       int
-	objects       []cfValue // object ID to object
+	objects       []cfValue    // object ID to object
+	shapes        []valueShape // object ID to the shape of its object
 	trailer       bplistTrailer
 	trailerOffset uint64
 
 	containerStack []offset // slice of object offsets; manipulated during container deserialization
+
+	budget uint64 // see valueBudget
+	work   uint64 // object references and bytes of strings and data read so far
 }
 
 func (p *bplistParser) validateDocumentTrailer() {
@@ -118,6 +128,8 @@ func (p *bplistParser) parseDocument() (pval cfValue, parseError error) {
 	// - Top object is in range
 
 	p.objects = make([]cfValue, p.trailer.NumObjects)
+	p.shapes = make([]valueShape, p.trailer.NumObjects)
+	p.budget = valueBudget(len(p.buffer))
 
 	pval = p.objectAtIndex(p.trailer.TopObject)
 	return pval, parseError
@@ -190,8 +202,9 @@ func (p *bplistParser) objectAtIndex(index uint64) cfValue {
 		panic(fmt.Errorf("object#%d starts beyond beginning of object table (0x%x, table@0x%x)", index, off, p.trailer.OffsetTableOffset))
 	}
 
-	pval := p.parseTagAtOffset(off)
+	pval, shape := p.parseTagAtOffset(off)
 	p.objects[index] = pval
+	p.shapes[index] = shape
 	return pval
 }
 
@@ -208,6 +221,14 @@ func (p *bplistParser) checkBufferRange(start offset, length uint64) {
 	s := uint64(start)
 	if s > bufLen || length > bufLen-s {
 		panic(fmt.Errorf("read of %d bytes at offset 0x%x exceeds buffer length %d", length, s, bufLen))
+	}
+}
+
+// Objects that do not overlap hold fewer references and payload bytes than the document has bytes.
+func (p *bplistParser) charge(n uint64) {
+	p.work += n
+	if p.work > p.budget {
+		panic(errTooManyValues)
 	}
 }
 
@@ -234,7 +255,7 @@ func (p *bplistParser) panicNestedObject(off offset) {
 		ids += fmt.Sprintf("0x%x > ", v)
 	}
 
-	// %s0x%d: ids above ends with " > "
+	// %s0x%x: ids above ends with " > "
 	panic(fmt.Errorf("self-referential collection@0x%x (%s0x%x) cannot be deserialized", off, ids, off))
 }
 
@@ -242,8 +263,19 @@ func (p *bplistParser) popNestedObject() {
 	p.containerStack = p.containerStack[:len(p.containerStack)-1]
 }
 
-func (p *bplistParser) parseTagAtOffset(off offset) cfValue {
+func (p *bplistParser) parseTagAtOffset(off offset) (cfValue, valueShape) {
 	p.checkBufferRange(off, 1) // runzero patch
+
+	switch p.buffer[off] & 0xF0 {
+	case bpTagDictionary:
+		return p.parseDictionaryAtOffset(off)
+	case bpTagArray:
+		return p.parseArrayAtOffset(off)
+	}
+	return p.parseScalarAtOffset(off), valueShape{values: 1}
+}
+
+func (p *bplistParser) parseScalarAtOffset(off offset) cfValue {
 	tag := p.buffer[off]
 
 	switch tag & 0xF0 {
@@ -276,7 +308,7 @@ func (p *bplistParser) parseTagAtOffset(off offset) cfValue {
 		bits := binary.BigEndian.Uint64(p.buffer[off+1:])
 		val := math.Float64frombits(bits)
 
-		// Apple Epoch is 20110101000000Z
+		// Apple Epoch is 20010101000000Z
 		// Adjust for UNIX Time
 		val += 978307200
 
@@ -295,10 +327,6 @@ func (p *bplistParser) parseTagAtOffset(off offset) cfValue {
 	case bpTagUID: // Somehow different than int: low half is nbytes - 1 instead of log2(nbytes)
 		lo, _, _ := p.parseSizedInteger(off+1, int(tag&0xF)+1)
 		return cfUID(lo)
-	case bpTagDictionary:
-		return p.parseDictionaryAtOffset(off)
-	case bpTagArray:
-		return p.parseArrayAtOffset(off)
 	}
 	panic(fmt.Errorf("unexpected atom 0x%2.02x at offset 0x%x", tag, off))
 }
@@ -333,7 +361,11 @@ func (p *bplistParser) parseDataAtOffset(off offset) []byte {
 	if start+offset(count) > offset(p.trailer.OffsetTableOffset) {
 		panic(fmt.Errorf("data@0x%x too long (%v bytes, max is %v)", off, count, p.trailer.OffsetTableOffset-uint64(start)))
 	}
-	return p.buffer[start : start+offset(count)]
+	p.charge(count)
+	// The copy has no spare capacity, so appending to it cannot write into memory another reference sees.
+	data := make([]byte, count)
+	copy(data, p.buffer[start:])
+	return data
 }
 
 func (p *bplistParser) parseASCIIStringAtOffset(off offset) string {
@@ -342,7 +374,8 @@ func (p *bplistParser) parseASCIIStringAtOffset(off offset) string {
 		panic(fmt.Errorf("ascii string@0x%x too long (%v bytes, max is %v)", off, count, p.trailer.OffsetTableOffset-uint64(start)))
 	}
 
-	return zeroCopy8BitString(p.buffer, int(start), int(count))
+	p.charge(count)
+	return string(p.buffer[start : start+offset(count)])
 }
 
 func (p *bplistParser) parseUTF16StringAtOffset(off offset) string {
@@ -352,6 +385,7 @@ func (p *bplistParser) parseUTF16StringAtOffset(off offset) string {
 		panic(fmt.Errorf("utf16 string@0x%x too long (%v bytes, max is %v)", off, byteLen, p.trailer.OffsetTableOffset-uint64(start)))
 	}
 
+	p.charge(byteLen)
 	u16s := make([]uint16, count)
 	for i := offset(0); i < offset(count); i++ {
 		u16s[i] = binary.BigEndian.Uint16(p.buffer[start+(i*2):])
@@ -360,29 +394,45 @@ func (p *bplistParser) parseUTF16StringAtOffset(off offset) string {
 	return string(runes)
 }
 
-func (p *bplistParser) parseObjectListAtOffset(off offset, count uint64) []cfValue {
+// Charging references as they are read bounds parsing; limiting the shape bounds unmarshaling.
+func (p *bplistParser) parseObjectListAtOffset(off offset, count uint64) ([]cfValue, valueShape) {
 	if off+offset(count*uint64(p.trailer.ObjectRefSize)) > offset(p.trailer.OffsetTableOffset) {
 		panic(fmt.Errorf("list@0x%x length (%v) puts its end beyond the offset table at 0x%x", off, count, p.trailer.OffsetTableOffset))
 	}
+	p.charge(count)
 	objects := make([]cfValue, count)
+	shape := valueShape{values: 1}
 
 	next := off
 	var oid uint64
 	for i := uint64(0); i < count; i++ {
 		oid, next = p.parseObjectRefAtOffset(next)
 		objects[i] = p.objectAtIndex(oid)
+
+		child := p.shapes[oid]
+		shape.values += child.values
+		if shape.values > p.budget {
+			panic(errTooManyValues)
+		}
+		if child.depth > shape.depth {
+			shape.depth = child.depth
+		}
 	}
 
-	return objects
+	shape.depth++
+	if shape.depth > maxParseDepth {
+		panic(errMaxDepthExceeded)
+	}
+	return objects, shape
 }
 
-func (p *bplistParser) parseDictionaryAtOffset(off offset) *cfDictionary {
+func (p *bplistParser) parseDictionaryAtOffset(off offset) (*cfDictionary, valueShape) {
 	p.pushNestedObject(off)
 	defer p.popNestedObject()
 
 	// A dictionary is an object list of [keys... values...].
 	cnt, start := p.countForTagAtOffset(off)
-	objects := p.parseObjectListAtOffset(start, cnt*2)
+	objects, shape := p.parseObjectListAtOffset(start, cnt*2)
 
 	keys := make([]string, cnt)
 	for i := uint64(0); i < cnt; i++ {
@@ -396,16 +446,17 @@ func (p *bplistParser) parseDictionaryAtOffset(off offset) *cfDictionary {
 	return &cfDictionary{
 		keys:   keys,
 		values: objects[cnt:],
-	}
+	}, shape
 }
 
-func (p *bplistParser) parseArrayAtOffset(off offset) *cfArray {
+func (p *bplistParser) parseArrayAtOffset(off offset) (*cfArray, valueShape) {
 	p.pushNestedObject(off)
 	defer p.popNestedObject()
 
 	// an array is just an object list
 	cnt, start := p.countForTagAtOffset(off)
-	return &cfArray{p.parseObjectListAtOffset(start, cnt)}
+	objects, shape := p.parseObjectListAtOffset(start, cnt)
+	return &cfArray{objects}, shape
 }
 
 func newBplistParser(r io.ReadSeeker) *bplistParser {

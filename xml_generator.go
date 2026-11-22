@@ -53,7 +53,9 @@ func (p *xmlPlistGenerator) generateDocument(root cfValue) {
 	p.openTag(`plist version="1.0"`)
 	p.writePlistValue(root)
 	p.closeTag(xmlPlistTag)
-	p.Flush()
+	if err := p.Flush(); err != nil {
+		panic(err)
+	}
 }
 
 func (p *xmlPlistGenerator) openTag(n string) {
@@ -133,6 +135,12 @@ func (p *xmlPlistGenerator) writePlistValue(pval cfValue) {
 			p.element(xmlFalseTag, "")
 		}
 	case cfData:
+		if len(pval) == 0 {
+			// CoreFoundation rejects a document that holds <data/>.
+			p.writeIndent(0)
+			p.WriteString("<data></data>")
+			return
+		}
 		p.element(xmlDataTag, base64.StdEncoding.EncodeToString([]byte(pval)))
 	case cfDate:
 		p.element(xmlDateTag, time.Time(pval).In(time.UTC).Format(time.RFC3339))

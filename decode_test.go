@@ -2,6 +2,7 @@ package plist
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"reflect"
@@ -9,9 +10,9 @@ import (
 )
 
 func TestLaxDecode(t *testing.T) {
-	laxTestDataStringsOnlyAsXML := `{B=1;D="2013-11-27 00:34:00 +0000";I64=1;F64="3.0";U64=2;}`
+	laxTestDataStringsOnly := `{B=1;D="2013-11-27 00:34:00 +0000";I64=1;F64="3.0";U64=2;}`
 	d := LaxTestData{}
-	buf := bytes.NewReader([]byte(laxTestDataStringsOnlyAsXML))
+	buf := bytes.NewReader([]byte(laxTestDataStringsOnly))
 	decoder := NewDecoder(buf)
 	decoder.lax = true
 	err := decoder.Decode(&d)
@@ -265,5 +266,102 @@ func TestShortReadFormatDetection(t *testing.T) {
 		if out["hello"] != "world" {
 			t.Fatalf("chunk=%d: got %v, want map[hello:world]", chunk, out)
 		}
+	}
+}
+
+func TestTextDocumentHoldingXMLTags(t *testing.T) {
+	tests := []struct {
+		document string
+		want     map[string]string
+	}{
+		{`{a = "<true/>";}`, map[string]string{"a": "<true/>"}},
+		{`{k="<true/>";}`, map[string]string{"k": "<true/>"}},
+		{`"msg" = "Enter a <string> value";`, map[string]string{"msg": "Enter a <string> value"}},
+		{"/* <plist> */ a = b;", map[string]string{"a": "b"}},
+		{`{a = "<plist><dict/></plist>";}`, map[string]string{"a": "<plist><dict/></plist>"}},
+	}
+	for _, tc := range tests {
+		var got map[string]string
+		format, err := Unmarshal([]byte(tc.document), &got)
+		if err != nil {
+			t.Errorf("%s: %v", tc.document, err)
+			continue
+		}
+		if format != OpenStepFormat || !reflect.DeepEqual(got, tc.want) {
+			t.Errorf("%s decoded as %s %q, want OpenStep %q", tc.document, FormatNames[format], got, tc.want)
+		}
+	}
+}
+
+func TestXMLDocumentStart(t *testing.T) {
+	const document = `<plist version="1.0"><string>x</string></plist>`
+
+	for _, prefix := range []string{"", " \t\r\n", "\xEF\xBB\xBF", "\xEF\xBB\xBF\n", xmlPreamble, "\xEF\xBB\xBF" + xmlPreamble, "<!-- c -->"} {
+		var got string
+		format, err := Unmarshal([]byte(prefix+document), &got)
+		if err != nil || format != XMLFormat || got != "x" {
+			t.Errorf("prefix %q: decoded %s %q with error %v, want XML \"x\"", prefix, FormatNames[format], got, err)
+		}
+	}
+
+	for _, prefix := range []string{"x", "junk ", "{", "\x00"} {
+		var got any
+		if _, err := Unmarshal([]byte(prefix+document), &got); err == nil {
+			t.Errorf("prefix %q: decoded %#v, want an error", prefix, got)
+		}
+	}
+}
+
+type seekFailer struct {
+	*bytes.Reader
+	seeks   int
+	failing int
+	err     error
+}
+
+func (r *seekFailer) Seek(offset int64, whence int) (int64, error) {
+	r.seeks++
+	if r.seeks == r.failing {
+		return 0, r.err
+	}
+	return r.Reader.Seek(offset, whence)
+}
+
+func TestDecodeReturnsSeekError(t *testing.T) {
+	want := errors.New("seek failed")
+	for failing := 1; failing <= 3; failing++ {
+		r := &seekFailer{Reader: bytes.NewReader([]byte(`<abab>`)), failing: failing, err: want}
+		var out any
+		if err := NewDecoder(r).Decode(&out); !errors.Is(err, want) {
+			t.Errorf("seek %d failing: Decode error = %v with value %#v, want %v", failing, err, out, want)
+		}
+	}
+}
+
+func TestDecodeStartsAtBeginningOfStream(t *testing.T) {
+	want := map[string]int{"answer": 42}
+
+	for _, format := range allFormats {
+		t.Run(FormatNames[format], func(t *testing.T) {
+			data, err := Marshal(want, format)
+			if err != nil {
+				t.Fatal(err)
+			}
+			r := bytes.NewReader(data)
+			if _, err := r.Seek(5, io.SeekStart); err != nil {
+				t.Fatal(err)
+			}
+
+			dec := NewDecoder(r)
+			for attempt := 1; attempt <= 2; attempt++ {
+				var got map[string]int
+				if err := dec.Decode(&got); err != nil {
+					t.Fatalf("Decode %d: %v", attempt, err)
+				}
+				if dec.Format != format || !reflect.DeepEqual(got, want) {
+					t.Fatalf("Decode %d: decoded %s %v, want %s %v", attempt, FormatNames[dec.Format], got, FormatNames[format], want)
+				}
+			}
+		})
 	}
 }
